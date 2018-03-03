@@ -32,4 +32,5 @@ grapher.register_single(  # format is [xarr, yarr]
     {'loss': [[epoch], [loss.data[0]]]},
     plot_type='line'
 )
+grapher.show()
 ```
