@@ -8,25 +8,6 @@ import torch.distributions as D
 from torch.autograd import Variable
 
 
-def softmax_correct(preds, targets):
-    pred = to_data(preds).max(1)[1] # get the index of the max log-probability
-    targ = to_data(targets)
-    return pred.eq(targ).cpu().type(torch.FloatTensor)
-
-
-def softmax_accuracy(preds, targets, size_average=True):
-    reduction_fn = torch.mean if size_average is True else torch.sum
-    return reduction_fn(softmax_correct(preds, targets))
-
-
-def bce_accuracy(pred_logits, targets, size_average=True):
-    cuda = is_cuda(pred_logits)
-    pred = torch.round(F.sigmoid(to_data(pred_logits)))
-    pred = pred.type(int_type(cuda))
-    reduction_fn = torch.mean if size_average is True else torch.sum
-    return reduction_fn(pred.data.eq(to_data(targets)).cpu().type(torch.FloatTensor), -1)
-
-
 def recurse_print_keys(m):
     for k, v in m.items():
         if isinstance(v, dict):
@@ -121,30 +102,6 @@ def num_samples_in_loader(data_loader):
 def append_to_csv(data, filename):
     with open(filename, 'ab') as f:
         np.savetxt(f, data, delimiter=",")
-
-
-def frechet_gauss_gauss_np(synthetic_features, test_features):
-    # calculate the statistics required for frechet distance
-    # https://github.com/bioinf-jku/TTUR/blob/master/fid.py
-    mu_synthetic = np.mean(synthetic_features, axis=0)
-    sigma_synthetic = np.cov(synthetic_features, rowvar=False)
-    mu_test = np.mean(test_features, axis=0)
-    sigma_test = np.cov(test_features, rowvar=False)
-
-    m = np.square(mu_synthetic - mu_test).sum()
-    s = sp.linalg.sqrtm(np.dot(sigma_synthetic, sigma_test))
-    dist = m + np.trace(sigma_synthetic + sigma_synthetic - 2*s)
-    if np.isnan(dist):
-        raise Exception("nan occured in FID calculation.")
-
-    return dist
-
-
-def frechet_gauss_gauss(dist_a, dist_b):
-    ''' d^2 = ||mu_1 - mu_2||^2 + Tr(C_1 + C_2 - 2*sqrt(C_1*C_2)). '''
-    m = torch.pow(dist_a.loc - dist_b.loc, 2).sum()
-    s = torch.sqrt(dist_a.scale * dist_b.scale)
-    return torch.mean(m + dist_a.scale + dist_b.scale - 2*s)
 
 
 def is_cuda(tensor_or_var):

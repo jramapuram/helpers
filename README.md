@@ -4,13 +4,12 @@ This repo can be cloned as a submodule into any project in order to provide:
 
     - helper functions
     - grapher module
+    - metrics
 
 ## Helper functions
 
 These functions include things like:
 
-    - compute softmax / bce accuracies
-    - frechet distance calculations
     - ones_like / zeros_like functions
     - directory creation / csv appender
     - expand / squeeze dims
@@ -18,6 +17,14 @@ These functions include things like:
     - one_hot generataion
     - normalization
     - int_type / long_type / float_type for cuda vs. regular tensors
+
+## Metrics
+
+Include functions like:
+
+    - compute softmax / bce accuracies
+    - frechet distance calculations
+    - compute EWC
 
 ## Grapher
 
