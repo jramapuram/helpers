@@ -3,10 +3,10 @@ import torch
 import torch.nn.functional as F
 import torch.distributions as D
 
+from scipy import linalg
 from torch.autograd import Variable
 
-from models.layers import Submodel
-from helpers.utils import to_data, float_type, \
+from .utils import to_data, float_type, \
     num_samples_in_loader, zero_pad_smaller_cat
 
 
@@ -29,7 +29,7 @@ def bce_accuracy(pred_logits, targets, size_average=True):
     return reduction_fn(pred.data.eq(to_data(targets)).cpu().type(torch.FloatTensor), -1)
 
 
-def frechet_gauss_gauss_np(synthetic_features, test_features):
+def frechet_gauss_gauss_np(synthetic_features, test_features, eps=1e-6):
     # calculate the statistics required for frechet distance
     # https://github.com/bioinf-jku/TTUR/blob/master/fid.py
     mu_synthetic = np.mean(synthetic_features, axis=0)
@@ -37,13 +37,31 @@ def frechet_gauss_gauss_np(synthetic_features, test_features):
     mu_test = np.mean(test_features, axis=0)
     sigma_test = np.cov(test_features, rowvar=False)
 
-    m = np.square(mu_synthetic - mu_test).sum()
-    s = sp.linalg.sqrtm(np.dot(sigma_synthetic, sigma_test))
-    dist = m + np.trace(sigma_synthetic + sigma_synthetic - 2*s)
-    if np.isnan(dist):
-        raise Exception("nan occured in FID calculation.")
+    diff = mu_synthetic - mu_test
 
-    return dist
+    # product might be almost singular
+    covmean, _ = linalg.sqrtm(sigma_synthetic.dot(sigma_test), disp=False)
+    if not np.isfinite(covmean).all():
+        offset = np.eye(sigma_synthetic.shape[0]) * eps
+        covmean = linalg.sqrtm((sigma_synthetic + offset).dot(sigma_test + offset))
+
+    # numerical error might give slight imaginary component
+    if np.iscomplexobj(covmean):
+        if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-2):
+            m = np.max(np.abs(covmean.imag))
+            raise ValueError("Imaginary component {}".format(m))
+        covmean = covmean.real
+
+    tr_covmean = np.trace(covmean)
+
+    return diff.dot(diff) + np.trace(sigma_synthetic) + np.trace(sigma_test) - 2 * tr_covmean
+    # m = np.square(mu_synthetic - mu_test).sum()
+    # s = sp.linalg.sqrtm(np.dot(sigma_synthetic, sigma_test))
+    # dist = m + np.trace(sigma_synthetic + sigma_synthetic - 2*s)
+    # if np.isnan(dist):
+    #     raise Exception("nan occured in FID calculation.")
+
+    # return dist
 
 
 def frechet_gauss_gauss(dist_a, dist_b):
@@ -53,17 +71,66 @@ def frechet_gauss_gauss(dist_a, dist_b):
     return torch.mean(m + dist_a.scale + dist_b.scale - 2*s)
 
 
-def calculate_fid(fid_model, model, loader, grapher, batch_size, cuda=False):
+def calculate_fid(fid_model, model, loader, grapher,
+                  num_samples, cuda=False):
     # evaluate and cache away the FID score
+    # model batch size can be larger than fid
+    # in order to evaluate large models like inceptionv3
     fid = np.inf
-    fid = calculate_fid_from_generated_images(fid_model, model, loader, batch_size, cuda=cuda)
+    fid = calculate_fid_from_generated_images(fid_model=fid_model,
+                                              model=model,
+                                              data_loader=loader,
+                                              num_samples=num_samples,
+                                              cuda=cuda)
     grapher.vis.text(str(fid), opts=dict(title="FID"))
     return fid
 
-def calculate_fid_from_generated_images(fid_model, model, data_loader, batch_size, fid_layer_index=-4, cuda=False):
+
+def calculate_fid_from_generated_images(fid_model, model, data_loader,
+                                        num_samples=2000, cuda=False):
     ''' Extract features and computes the FID score for the VAE vs. the classifier
         NOTE: expects a trained fid classifier and model '''
-    fid_submodel = Submodel(fid_model, layer_index=fid_layer_index)
+    fid_model.eval()
+    model.eval()
+
+    # override the min sample count by comparing against the test set
+    num_test_samples = num_samples_in_loader(data_loader.test_loader)
+    num_samples = min(num_samples, num_test_samples)
+
+    print("calculating FID, this can take a while...")
+    fid, samples_seen = [], 0
+    with torch.no_grad():
+        for data, _ in data_loader.test_loader:
+            data = Variable(data).cuda() if cuda else Variable(data)
+            batch_size = data.size(0)
+            assert fid_model.batch_size <= batch_size
+            for begin, end in zip(range(0, batch_size, fid_model.batch_size),
+                                  range(fid_model.batch_size, batch_size+1, fid_model.batch_size)):
+                generated = model.generate_synthetic_samples(model.student, batch_size)
+                _, test_features = fid_model(data[begin:end])
+                _, generated_features = fid_model(generated[begin:end])
+                test_features = test_features.view(fid_model.batch_size, -1)
+                generated_features = generated_features.view(fid_model.batch_size, -1)
+                fid.append(frechet_gauss_gauss_np(generated_features.cpu().numpy(),
+                                                  test_features.cpu().numpy()))
+                samples_seen += fid_model.batch_size
+
+            if samples_seen > num_samples:
+                break
+
+
+    frechet_dist = np.mean(fid)
+    print("frechet distance [ {} samples ]: {}\n".format(
+        samples_seen, frechet_dist
+    ))
+    return np.asarray([frechet_dist])
+
+
+def calculate_fid_from_generated_images_gpu(fid_model, model, data_loader,
+                                            batch_size, fid_layer_index=-4, cuda=False):
+    ''' Extract features and computes the FID score for the VAE vs. the classifier
+        NOTE: expects a trained fid classifier and model '''
+    fid_submodel = fid_model[0:fid_layer_index]
     fid_submodel.eval()
     model.eval()
 
@@ -97,7 +164,7 @@ def calculate_consistency(model, loader, reparam_type, vae_type, cuda=False):
     if model.current_model > 0 and (reparam_type == 'mixture'
                                     or reparam_type == 'discrete'):
         model.eval() # prevents data augmentation
-        consistency = []
+        consistency, samples_seen = [], 0
 
         for img, _ in loader.test_loader:
             with torch.no_grad():
@@ -107,7 +174,7 @@ def calculate_consistency(model, loader, reparam_type, vae_type, cuda=False):
                 if vae_type == 'parallel':
                     teacher_posterior = output_map['teacher']['params']['discrete']['logits']
                     student_posterior = output_map['student']['params']['discrete']['logits']
-                else: # sequential
+                elif vae_type == 'sequential':
                     if 'discrete' not in output_map['teacher']['params']['params_0']:
                         # we need the first reparam to be discrete to calculate
                         # the consistency metric
@@ -115,6 +182,8 @@ def calculate_consistency(model, loader, reparam_type, vae_type, cuda=False):
 
                     teacher_posterior = output_map['teacher']['params']['params_0']['discrete']['logits']
                     student_posterior = output_map['student']['params']['params_0']['discrete']['logits']
+                else:
+                    raise Exception('unknown VAE consistency requested')
 
                 teacher_posterior = F.softmax(teacher_posterior, dim=-1)
                 student_posterior = F.softmax(student_posterior, dim=-1)
@@ -127,11 +196,12 @@ def calculate_consistency(model, loader, reparam_type, vae_type, cuda=False):
                 # print("teacher = ", teacher_posterior)
                 # print("student = ", student_posterior)
                 # print("consistency[-1]=", correct)
+                samples_seen += img.size(0)
 
         num_test_samples = num_samples_in_loader(loader.test_loader)
         consistency = np.mean(consistency)
-        print("Consistency [#samples: {}]: {}\n".format(num_test_samples,
-                                                      consistency))
+        print("Consistency [#samples: {}]: {}\n".format(samples_seen,
+                                                        consistency))
     return np.asarray([consistency])
 
 

@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 import torch.distributions as D
 
-from helpers.utils import ones_like
+from .utils import ones_like
 
 def log_logistic_256(x, mean, log_s, average=False, dim=None):
     ''' from jmtomczak's github'''
