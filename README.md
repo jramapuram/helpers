@@ -5,6 +5,8 @@ This repo can be cloned as a submodule into any project in order to provide:
     - helper functions
     - grapher module
     - metrics
+    - layers
+    - fid
 
 ## Helper functions
 
@@ -25,6 +27,28 @@ Include functions like:
     - compute softmax / bce accuracies
     - frechet distance calculations
     - compute EWC
+    - compute FID
+
+## Layers
+
+Include layers such as :
+
+    - dense with many sequential layers & bn
+    - conv stack
+    - dense / conv encoder + decoder stack
+    - bw2rgb module
+    - Identity, View layers, and more!
+
+
+## FID:
+
+To compute FID use `train_fid_model` from `fid.py`.
+You can use a simple `conv` model or `inceptionv3`.
+The FID batch size can smaller than or equal to the model you train.
+For inceptionv3 you need small batch sizes unless you have a badass P100 or something.
+
+After this you can use `calculate_fid` from metrics.
+
 
 ## Grapher
 
