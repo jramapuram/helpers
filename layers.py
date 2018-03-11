@@ -376,9 +376,7 @@ def build_relational_conv_encoder(input_shape, filter_depth=32,
         nn.BatchNorm2d(filter_depth*4),
         activation_fn(inplace=True),
         # state dim: 128 x 10 x 10
-        nn.Conv2d(filter_depth*4, filter_depth*8, 4, stride=2, bias=True),
-        nn.BatchNorm2d(filter_depth*8),
-        activation_fn(inplace=True),
+        nn.Conv2d(filter_depth*4, filter_depth*8, 4, stride=2, bias=True)
         # state dim: 256 x 4 x 4
     )
 
@@ -448,20 +446,21 @@ def build_conv_encoder(input_shape, output_size, filter_depth=32,
         activation_fn(inplace=True),
         # state dim: 512 x 1 x 1
         nn.Conv2d(filter_depth*16, output_size, 1, stride=1, bias=True),
-        nn.BatchNorm2d(output_size),
-        activation_fn(inplace=True)
         # output dim: opt.z_dim x 1 x 1
+        View([-1, output_size])
     )
 
 def build_dense_encoder(input_shape, output_size, latent_size=512, activation_fn=nn.ELU):
+    input_flat = int(np.prod(input_shape))
+    output_flat = int(np.prod(output_size))
+    output_size = [output_size] if not isinstance(output_size, list) else output_size
     return nn.Sequential(
-        View([-1, int(np.prod(input_shape))]),
-        nn.Linear(int(np.prod(input_shape)), latent_size),
+        View([-1, input_flat]),
+        nn.Linear(input_flat, latent_size),
         nn.BatchNorm1d(latent_size),
         activation_fn(),
-        nn.Linear(latent_size, output_size),
-        nn.BatchNorm1d(output_size),
-        activation_fn()
+        nn.Linear(latent_size, output_flat),
+        View([-1, *output_size])
     )
 
 def build_dense_decoder(input_size, output_shape, latent_size=512, activation_fn=nn.ELU):
