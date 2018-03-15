@@ -3,9 +3,16 @@ import torch
 import torch.nn as nn
 import numpy as np
 import scipy as sp
+import contextlib
 import torch.nn.functional as F
 import torch.distributions as D
 from torch.autograd import Variable
+
+
+@contextlib.contextmanager
+def dummy_context():
+    ''' for conditional with statements'''
+    yield None
 
 
 def recurse_print_keys(m):

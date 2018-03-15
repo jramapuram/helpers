@@ -464,9 +464,10 @@ def build_dense_encoder(input_shape, output_size, latent_size=512, activation_fn
     )
 
 def build_dense_decoder(input_size, output_shape, latent_size=512, activation_fn=nn.ELU):
+    input_flat = int(np.prod(input_size))
     return nn.Sequential(
-        View([-1, input_size]),
-        nn.Linear(input_size, latent_size),
+        View([-1, input_flat]),
+        nn.Linear(input_flat, latent_size),
         nn.BatchNorm1d(latent_size),
         activation_fn(),
         nn.Linear(latent_size, latent_size),

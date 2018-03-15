@@ -57,8 +57,8 @@ def nll_bernoulli(x, recon_x_logits):
 def nll_clamp(x, recon):
     ''' log-logistic with clamping '''
     batch_size, num_half_chans = x.size(0), recon.size(1) // 2
-    recon_mu = recon[:, 0:num_half_chans, :, :]
-    recon_logvar = recon[:, num_half_chans:, :, :]
+    recon_mu = recon[:, 0:num_half_chans, :, :].contiguous()
+    recon_logvar = recon[:, num_half_chans:, :, :].contiguous()
     return log_logistic_256(x.view(batch_size, -1),
                             torch.clamp(recon_mu.view(batch_size, -1), min=0.+1./512., max=1.-1./512.),
                             F.hardtanh(recon_logvar.view(batch_size, -1), min_val=-4.5, max_val=0),
@@ -67,8 +67,8 @@ def nll_clamp(x, recon):
 
 def nll_laplace(x, recon):
     batch_size, num_half_chans = x.size(0), recon.size(1) // 2
-    recon_mu = recon[:, 0:num_half_chans, :, :]
-    recon_logvar = recon[:, num_half_chans:, :, :]
+    recon_mu = recon[:, 0:num_half_chans, :, :].contiguous()
+    recon_logvar = recon[:, num_half_chans:, :, :].contiguous()
 
     nll = D.Laplace(
         # recon_mu.view(batch_size, -1),
@@ -81,8 +81,8 @@ def nll_laplace(x, recon):
 
 def nll_gaussian(x, recon):
     batch_size, num_half_chans = x.size(0), recon.size(1) // 2
-    recon_mu = recon[:, 0:num_half_chans, :, :]
-    recon_logvar = recon[:, num_half_chans:, :, :]
+    recon_mu = recon[:, 0:num_half_chans, :, :].contiguous()
+    recon_logvar = recon[:, num_half_chans:, :, :].contiguous()
 
     # XXX: currently broken, so set var to 1
     recon_logvar = ones_like(recon_mu)
