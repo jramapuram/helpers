@@ -137,6 +137,8 @@ def zeros_like(tensor):
         zeros = int_type(cuda)(*shp).zero_()
     elif tensor_type == long_type(cuda):
         zeros = long_type(cuda)(*shp).zero_()
+    elif tensor_type == half_type(cuda):
+        zeros = half_type(cuda)(*shp).zero_()
     else:
         raise Exception("unsuported type passed to zeros: ", tensor_type)
 
@@ -154,6 +156,8 @@ def ones_like(tensor):
         ones = int_type(cuda)(*shp).zero_().add_(1)
     elif tensor_type == long_type(cuda):
         ones = long_type(cuda)(*shp).zero_().add_(1)
+    elif tensor_type == half_type(cuda):
+        ones = half_type(cuda)(*shp).zero_().add_(1)
     else:
         raise Exception("unsupported type passed to ones: ", tensor_type)
 
@@ -290,8 +294,20 @@ def to_data(tensor_or_var):
     return tensor_or_var
 
 
+def eps(half):
+    return 1e-4 if half else 1e-6
+
+
+def same_type(half, cuda):
+    return half_type(cuda) if half else float_type(cuda)
+
+
 def float_type(use_cuda):
     return torch.cuda.FloatTensor if use_cuda else torch.FloatTensor
+
+
+def half_type(use_cuda):
+    return torch.cuda.HalfTensor if use_cuda else torch.HalfTensor
 
 
 def pad(tensor_or_var, num_pad, value=0, prepend=False, dim=-1):
@@ -359,11 +375,56 @@ def check_or_create_dir(dir_path):
         os.makedirs(dir_path)
 
 
+class ToFP16(nn.Module):
+    def __init__(self):
+        super(ToFP16, self).__init__()
+
+    def forward(self, input):
+        return input.half()
+
+
+def copy_in_params(net, params):
+    net_params = list(net.parameters())
+    for i in range(len(params)):
+        net_params[i].data.copy_(params[i].data)
+
+
+def set_grad(params, params_with_grad):
+    ''' helper to set params (needed for fp16)'''
+    for param, param_w_grad in zip(params, params_with_grad):
+        if param.grad is None:
+            param.grad = torch.nn.Parameter(param.data.new().resize_(*param.data.size()))
+
+        param.grad.data.copy_(param_w_grad.grad.data)
+
+
+def convert_bn_to_float(module):
+    '''
+    BatchNorm layers to have parameters in single precision.
+    Find all layers and convert them back to float. This can't
+    be done with built in .apply as that function will apply
+    fn to all modules, parameters, and buffers. Thus we wouldn't
+    be able to guard the float conversion based on the module type.
+    '''
+    if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
+        module.float()
+
+    for child in module.children():
+        convert_bn_to_float(child)
+
+    return module
+
+
+def network_to_half(network):
+    return convert_bn_to_float(network.half())
+
+
 def register_nan_checks(model):
     def check_grad(module, grad_input, grad_output):
         # print(module) you can add this to see that the hook is called
         #print(module)
         if  any(np.all(np.isnan(gi.data.cpu().numpy())) for gi in grad_input if gi is not None):
             print('NaN gradient in ' + type(module).__name__)
+            exit(-1)
 
     model.apply(lambda module: module.register_backward_hook(check_grad))
