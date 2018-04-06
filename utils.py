@@ -147,6 +147,32 @@ def zeros_like(tensor):
     return zeros if not is_var else Variable(zeros)
 
 
+def ones(shape, cuda, dtype='float32'):
+    ones_map = {
+        'float32': float_type,
+        'float64': double_type,
+        'double': double_type,
+        'half': half_type,
+        'float16': half_type,
+        'int32': int_type,
+        'int64': long_type
+    }
+    return ones_map[dtype](cuda)(*shape).zero_() + 1
+
+
+def zeros(shape, cuda, dtype='float32'):
+    type_map = {
+        'float32': float_type,
+        'float64': double_type,
+        'double': double_type,
+        'half': half_type,
+        'float16': half_type,
+        'int32': int_type,
+        'int64': long_type
+    }
+    return type_map[dtype](cuda)(*shape).zero_()
+
+
 def ones_like(tensor):
     shp = tensor.size()
     cuda = is_cuda(tensor)
