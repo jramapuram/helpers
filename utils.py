@@ -121,7 +121,9 @@ def is_cuda(tensor_or_var):
         torch.cuda.LongTensor: True,
         torch.LongTensor: False,
         torch.cuda.HalfTensor: True,
-        torch.HalfTensor: False
+        torch.HalfTensor: False,
+        torch.cuda.DoubleTensor: True,
+        torch.DoubleTensor: False
     }
     return cuda_map[type(tensor)]
 
@@ -300,6 +302,10 @@ def eps(half):
 
 def same_type(half, cuda):
     return half_type(cuda) if half else float_type(cuda)
+
+
+def double_type(use_cuda):
+    return torch.cuda.DoubleTensor if use_cuda else torch.DoubleTensor
 
 
 def float_type(use_cuda):
