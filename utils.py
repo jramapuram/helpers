@@ -173,6 +173,32 @@ def zeros(shape, cuda, dtype='float32'):
     return type_map[dtype](cuda)(*shape).zero_()
 
 
+def normal(shape, cuda, mean=0, sigma=1, dtype='float32'):
+    type_map = {
+        'float32': float_type,
+        'float64': double_type,
+        'double': double_type,
+        'half': half_type,
+        'float16': half_type,
+        'int32': int_type,
+        'int64': long_type
+    }
+    return type_map[dtype](cuda)(*shape).normal_(mean, sigma)
+
+
+def uniform(shape, cuda, a=0, b=1, dtype='float32'):
+    type_map = {
+        'float32': float_type,
+        'float64': double_type,
+        'double': double_type,
+        'half': half_type,
+        'float16': half_type,
+        'int32': int_type,
+        'int64': long_type
+    }
+    return type_map[dtype](cuda)(*shape).uniform_(a, b)
+
+
 def ones_like(tensor):
     shp = tensor.size()
     cuda = is_cuda(tensor)
