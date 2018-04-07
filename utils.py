@@ -148,6 +148,7 @@ def zeros_like(tensor):
 
 
 def ones(shape, cuda, dtype='float32'):
+    shape = list(shape) if isinstance(shape, tuple) else shape
     ones_map = {
         'float32': float_type,
         'float64': double_type,
@@ -161,6 +162,7 @@ def ones(shape, cuda, dtype='float32'):
 
 
 def zeros(shape, cuda, dtype='float32'):
+    shape = list(shape) if isinstance(shape, tuple) else shape
     type_map = {
         'float32': float_type,
         'float64': double_type,
@@ -174,6 +176,7 @@ def zeros(shape, cuda, dtype='float32'):
 
 
 def normal(shape, cuda, mean=0, sigma=1, dtype='float32'):
+    shape = list(shape) if isinstance(shape, tuple) else shape
     type_map = {
         'float32': float_type,
         'float64': double_type,
@@ -186,7 +189,23 @@ def normal(shape, cuda, mean=0, sigma=1, dtype='float32'):
     return type_map[dtype](cuda)(*shape).normal_(mean, sigma)
 
 
+def discrete_uniform(shape, cuda, a=0, b=2, dtype='float32'):
+    ''' NOTE: this generates discrete values up to b - 1'''
+    shape = list(shape) if isinstance(shape, tuple) else shape
+    type_map = {
+        'float32': float_type,
+        'float64': double_type,
+        'double': double_type,
+        'half': half_type,
+        'float16': half_type,
+        'int32': int_type,
+        'int64': long_type
+    }
+    return type_map[dtype](cuda)(*shape).random_(a, b)
+
+
 def uniform(shape, cuda, a=0, b=1, dtype='float32'):
+    shape = list(shape) if isinstance(shape, tuple) else shape
     type_map = {
         'float32': float_type,
         'float64': double_type,
