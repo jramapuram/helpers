@@ -218,6 +218,10 @@ def uniform(shape, cuda, a=0, b=1, dtype='float32'):
     return type_map[dtype](cuda)(*shape).uniform_(a, b)
 
 
+def eye(num_elems, cuda, dtype='float32'):
+    return torch.diag(ones([num_elems], cuda=cuda, dtype=dtype))
+
+
 def ones_like(tensor):
     shp = tensor.size()
     cuda = is_cuda(tensor)
