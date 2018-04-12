@@ -49,7 +49,7 @@ def invert_shuffle(arr, perm):
 def normalize_images(imgs, mu=None, sigma=None, eps=1e-9):
     ''' normalize imgs with provided mu /sigma
         or computes them and returns with the normalized
-       images '''
+       images and tabulated mu / sigma'''
     if mu is None:
         if len(imgs.shape) == 4:
             chans = imgs.shape[1]
@@ -112,37 +112,40 @@ def append_to_csv(data, filename):
 
 
 def is_cuda(tensor_or_var):
-    tensor = to_data(tensor_or_var)
-    cuda_map = {
-        torch.cuda.FloatTensor: True,
-        torch.FloatTensor: False,
-        torch.cuda.IntTensor: True,
-        torch.IntTensor: False,
-        torch.cuda.LongTensor: True,
-        torch.LongTensor: False,
-        torch.cuda.HalfTensor: True,
-        torch.HalfTensor: False,
-        torch.cuda.DoubleTensor: True,
-        torch.DoubleTensor: False
-    }
-    return cuda_map[type(tensor)]
+    return tensor_or_var.is_cuda
 
 
 def zeros_like(tensor):
     shp = tensor.size()
     cuda = is_cuda(tensor)
     is_var = type(tensor) == Variable
-    tensor_type = type(to_data(tensor))
-    if tensor_type == float_type(cuda):
-        zeros = float_type(cuda)(*shp).zero_()
-    elif tensor_type == int_type(cuda):
-        zeros = int_type(cuda)(*shp).zero_()
-    elif tensor_type == long_type(cuda):
-        zeros = long_type(cuda)(*shp).zero_()
-    elif tensor_type == half_type(cuda):
-        zeros = half_type(cuda)(*shp).zero_()
-    else:
-        raise Exception("unsuported type passed to zeros: ", tensor_type)
+
+    try: # pytorch 0.4.0a0+108f5c1 +
+        tensor_type = to_data(tensor).dtype
+        dtype_map = {
+            torch.cuda.float32: float_type(cuda)(*shp).zero_(),
+            torch.float32: float_type(cuda)(*shp).zero_(),
+            torch.cuda.float16: half_type(cuda)(*shp).zero_(),
+            torch.float16: half_type(cuda)(*shp).zero_(),
+            torch.cuda.int64: long_type(cuda)(*shp).zero_(),
+            torch.int64: long_type(cuda)(*shp).zero_(),
+            torch.cuda.int32: int_type(cuda)(*shp).zero_(),
+            torch.int32: int_type(cuda)(*shp).zero_()
+        }
+        zeros = dtype_map[tensor_type]
+    except:
+        # older pytorch versions
+        tensor_type = type(to_data(tensor))
+        if tensor_type == float_type(cuda):
+            zeros = float_type(cuda)(*shp).zero_()
+        elif tensor_type == int_type(cuda):
+            zeros = int_type(cuda)(*shp).zero_()
+        elif tensor_type == long_type(cuda):
+            zeros = long_type(cuda)(*shp).zero_()
+        elif tensor_type == half_type(cuda):
+            zeros = half_type(cuda)(*shp).zero_()
+        else:
+            raise Exception("unsuported type passed to zeros: ", tensor_type)
 
     return zeros if not is_var else Variable(zeros)
 
@@ -223,23 +226,7 @@ def eye(num_elems, cuda, dtype='float32'):
 
 
 def ones_like(tensor):
-    shp = tensor.size()
-    cuda = is_cuda(tensor)
-    is_var = type(tensor) == Variable
-    tensor_type = type(to_data(tensor))
-    if tensor_type == float_type(cuda):
-        ones = float_type(cuda)(*shp).zero_().add_(1)
-    elif tensor_type == int_type(cuda):
-        ones = int_type(cuda)(*shp).zero_().add_(1)
-    elif tensor_type == long_type(cuda):
-        ones = long_type(cuda)(*shp).zero_().add_(1)
-    elif tensor_type == half_type(cuda):
-        ones = half_type(cuda)(*shp).zero_().add_(1)
-    else:
-        raise Exception("unsupported type passed to ones: ", tensor_type)
-
-    return ones if not is_var else Variable(ones)
-
+    return zeros_like(tensor) + 1
 
 def scale(val, src, dst):
     """Helper to scale val from src range to dst range
