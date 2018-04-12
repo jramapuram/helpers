@@ -56,14 +56,14 @@ class Grapher(object):
     def _plot_img(self, img_list):
         for img_map in img_list:
             for key, value in img_map.items():
-                self.vis.image(to_data(value).cpu().numpy(),
+                self.vis.image(to_data(value).detach().cpu().numpy(),
                                opts=dict(title=key),
                                win=key)
 
     def _plot_imgs(self, imgs_list):
         for imgs_map in imgs_list:
             for key, value in imgs_map.items():
-                self.vis.images(to_data(value).cpu().numpy(),
+                self.vis.images(to_data(value).detach().cpu().numpy(),
                                 opts=dict(title=key),
                                 win=key)
 

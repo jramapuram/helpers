@@ -91,7 +91,7 @@ def test(epoch, model, data_loader, args):
             loss_t = model.loss_function(output, target)
             correct_t = softmax_accuracy(output, target)
 
-            loss.append(loss_t.detach().cpu().data[0])
+            loss.append(loss_t.detach().cpu().item())
             correct.append(correct_t)
 
     loss = np.mean(loss)
