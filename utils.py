@@ -121,16 +121,16 @@ def zeros_like(tensor):
     is_var = type(tensor) == Variable
 
     try: # pytorch 0.4.0a0+108f5c1 +
-        tensor_type = to_data(tensor).dtype
+        tensor_type = to_data(tensor).type()
         dtype_map = {
-            torch.cuda.float32: float_type(cuda)(*shp).zero_(),
-            torch.float32: float_type(cuda)(*shp).zero_(),
-            torch.cuda.float16: half_type(cuda)(*shp).zero_(),
-            torch.float16: half_type(cuda)(*shp).zero_(),
-            torch.cuda.int64: long_type(cuda)(*shp).zero_(),
-            torch.int64: long_type(cuda)(*shp).zero_(),
-            torch.cuda.int32: int_type(cuda)(*shp).zero_(),
-            torch.int32: int_type(cuda)(*shp).zero_()
+            'torch.cuda.FloatTensor': float_type(cuda)(*shp).zero_(),
+            'torch.FloatTensor': float_type(cuda)(*shp).zero_(),
+            'torch.cuda.HalfTensor': half_type(cuda)(*shp).zero_(),
+            'torch.HalfTensor': half_type(cuda)(*shp).zero_(),
+            'torch.cuda.LongTensor': long_type(cuda)(*shp).zero_(),
+            'torch.LongTensor': long_type(cuda)(*shp).zero_(),
+            'torch.cuda.IntTensor': int_type(cuda)(*shp).zero_(),
+            'torch.IntTensor': int_type(cuda)(*shp).zero_()
         }
         zeros = dtype_map[tensor_type]
     except:
