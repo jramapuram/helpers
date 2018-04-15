@@ -125,8 +125,10 @@ def zeros_like(tensor):
         dtype_map = {
             'torch.cuda.FloatTensor': float_type(cuda)(*shp).zero_(),
             'torch.FloatTensor': float_type(cuda)(*shp).zero_(),
-            'torch.cuda.HalfTensor': half_type(cuda)(*shp).zero_(),
-            'torch.HalfTensor': half_type(cuda)(*shp).zero_(),
+             # TODO: fix this! half type is not generating zeros properly in 0.4
+             #       change to: half_type(cuda)(*shp).zero_(),
+            'torch.cuda.HalfTensor': float_type(cuda)(*shp).zero_().type(half_type(cuda)),
+            'torch.HalfTensor': float_type(cuda)(*shp).zero_().type(half_type(cuda)),
             'torch.cuda.LongTensor': long_type(cuda)(*shp).zero_(),
             'torch.LongTensor': long_type(cuda)(*shp).zero_(),
             'torch.cuda.IntTensor': int_type(cuda)(*shp).zero_(),
