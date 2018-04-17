@@ -211,8 +211,8 @@ def estimate_fisher(model, data_loader, batch_size, sample_size=1024, cuda=False
     loglikelihoods = []
     for x, _ in data_loader.train_loader:
         x = Variable(x).cuda() if cuda else Variable(x)
-        reconstr_x, params = model.teacher(x)
-        loss_teacher = model.teacher.loss_function(reconstr_x, x, params)
+        reconstr_x, params = model(x)
+        loss_teacher = model.loss_function(reconstr_x, x, params)
         loglikelihoods.append(
             loss_teacher['loss']
         )
@@ -222,9 +222,9 @@ def estimate_fisher(model, data_loader, batch_size, sample_size=1024, cuda=False
     # estimate the fisher information of the parameters.
     loglikelihood = torch.cat(loglikelihoods, 0).mean(0)
     loglikelihood_grads = torch.autograd.grad(
-        loglikelihood, model.teacher.parameters()
+        loglikelihood, model.parameters()
     )
     parameter_names = [
-        n.replace('.', '__') for n, p in model.teacher.named_parameters()
+        n.replace('.', '__') for n, p in model.named_parameters()
     ]
     return {n: g**2 for n, g in zip(parameter_names, loglikelihood_grads)}
