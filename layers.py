@@ -37,10 +37,11 @@ class BWtoRGB(nn.Module):
 
 
 class EarlyStopping(object):
-    def __init__(self, model, max_steps=10, save_best=True):
+    def __init__(self, model, max_steps=10, burn_in_interval=None, save_best=True):
         self.max_steps = max_steps
         self.model = model
         self.save_best = save_best
+        self.burn_in_interval = burn_in_interval
 
         self.loss = 0.0
         self.iteration = 0
@@ -57,7 +58,12 @@ class EarlyStopping(object):
             if self.save_best:
                 self.model.save(overwrite=True)
         else:
-            self.stopping_step += 1
+            if self.burn_in_interval is not None and self.iteration > self.burn_in_interval:
+                # want burn in and ensure threshold has been met
+                self.stopping_step += 1
+            elif self.burn_in_interval is None:
+                # when we dont want burn in
+                self.stopping_step += 1
 
         is_early_stop = False
         if self.stopping_step >= self.max_steps:

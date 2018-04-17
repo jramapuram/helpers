@@ -100,6 +100,7 @@ def calculate_fid_from_generated_images(fid_model, model, data_loader,
     print("calculating FID, this can take a while...")
     fid, samples_seen = [], 0
     with torch.no_grad():
+        # NOTE: requires shuffled test-data as we pick first num_samples
         for data, _ in data_loader.test_loader:
             data = Variable(data).cuda() if cuda else Variable(data)
             batch_size = data.size(0)
