@@ -36,6 +36,22 @@ class BWtoRGB(nn.Module):
             return x
 
 
+class MaskedConv2d(nn.Conv2d):
+    ''' from jmtomczak's github '''
+    def __init__(self, mask_type, *args, **kwargs):
+        super(MaskedConv2d, self).__init__(*args, **kwargs)
+        assert mask_type in {'A', 'B'}
+        self.register_buffer('mask', self.weight.data.clone())
+        _, _, kH, kW = self.weight.size()
+        self.mask.fill_(1)
+        self.mask[:, :, kH // 2, kW // 2 + (mask_type == 'B'):] = 0
+        self.mask[:, :, kH // 2 + 1:] = 0
+
+    def forward(self, x):
+        self.weight.data *= self.mask
+        return super(MaskedConv2d, self).forward(x)
+
+
 class EarlyStopping(object):
     def __init__(self, model, max_steps=10, burn_in_interval=None, save_best=True):
         self.max_steps = max_steps
@@ -384,6 +400,31 @@ def build_relational_conv_encoder(input_shape, filter_depth=32,
         # state dim: 128 x 10 x 10
         nn.Conv2d(filter_depth*4, filter_depth*8, 4, stride=2, bias=True)
         # state dim: 256 x 4 x 4
+    )
+
+
+
+def build_pixelcnn_decoder(input_size, output_shape, filter_depth=32,
+                           activation_fn=nn.ELU, bilinear_size=(32, 32)):
+    ''' from jmtomczak's github '''
+
+    # self.conv = nn.Conv2d(input_channels, output_channels, kernel_size, stride, padding, dilation, bias=bias)
+    # self.p_x_mean = Conv2d(64, 1, 1, 1, 0, activation=nn.Sigmoid())
+    # def __init__(self, input_channels, output_channels, kernel_size, stride, padding, dilation=1, activation=None, bias=True):
+
+    chans = output_shape[0]
+    act = nn.ReLU(True)
+    return nn.Sequential(
+        MaskedConv2d('A', input_size, 64, 3, 1, 1, bias=False),
+        nn.BatchNorm2d(64), act,
+        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False), nn.BatchNorm2d(64), act,
+        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False), nn.BatchNorm2d(64), act,
+        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False), nn.BatchNorm2d(64), act,
+        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False), nn.BatchNorm2d(64), act,
+        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False), nn.BatchNorm2d(64), act,
+        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False), nn.BatchNorm2d(64), act,
+        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False), nn.BatchNorm2d(64), act,
+        nn.Conv2d(64, chans, 1, 1, 0, dilation=1, bias=True)
     )
 
 
