@@ -4,17 +4,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import torch.utils.model_zoo as model_zoo
+
 from torch.autograd import Variable
 from copy import deepcopy
 from collections import Counter
 from torchvision.models.inception import InceptionA, InceptionB, \
-    InceptionC, InceptionD, InceptionE, BasicConv2d
+    InceptionC, InceptionD, InceptionE, BasicConv2d, InceptionAux
 
 from optimizers.adamnormgrad import AdamNormGrad
 from datasets.loader import get_loader
-from datasets.utils import GenericLoader, simple_merger #TODO: move to datasets
+from datasets.utils import GenericLoader, label_offset_merger, simple_merger
 
-from .utils import float_type, check_or_create_dir
+from .utils import float_type, check_or_create_dir, num_samples_in_loader
 from .metrics import softmax_accuracy
 from .layers import View, Identity, flatten_layers, EarlyStopping, \
     BWtoRGB, build_conv_encoder
@@ -70,13 +72,12 @@ def train(epoch, model, optimizer, data_loader, args):
             print('[FID]Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\tAccuracy: {:.4f}'.format(
                 epoch, batch_idx * len(data), num_samples,
                 100. * batch_idx * len(data) / num_samples,
-                loss.data[0], correct))
+                loss.data.item(), correct))
 
 
 def test(epoch, model, data_loader, args):
     model.eval()
-    loss = []
-    correct = []
+    loss, correct, num_samples = [], [], 0
 
     for data, target in data_loader.test_loader:
         if args.cuda:
@@ -93,11 +94,12 @@ def test(epoch, model, data_loader, args):
 
             loss.append(loss_t.detach().cpu().item())
             correct.append(correct_t)
+            num_samples += data.size(0)
 
     loss = np.mean(loss)
     acc = np.mean(correct)
-    print('\n[FID]Test Epoch: {}\tAverage loss: {:.4f}\tAverage Accuracy: {:.4f}\n'.format(
-        epoch, loss, acc)
+    print('\n[FID {} samples]Test Epoch: {}\tAverage loss: {:.4f}\tAverage Accuracy: {:.4f}\n'.format(
+        num_samples, epoch, loss, acc)
     )
     return loss, acc
 
@@ -106,7 +108,15 @@ def train_fid_model(args, fid_type='conv', batch_size=32):
     ''' builds and trains a classifier '''
     loader = get_loader(args)
     if isinstance(loader, list): # has a sequential loader
-        loader = simple_merger(loader, batch_size, args.cuda)
+        if fid_type == 'conv':
+            loader = label_offset_merger(loader, batch_size, args.cuda)
+        else:
+            loader = simple_merger(loader, batch_size, args.cuda)
+
+    # debug prints
+    print("[FID] train = ", num_samples_in_loader(loader.train_loader),
+          " | test = ", num_samples_in_loader(loader.test_loader),
+          " | output_classes = ", loader.output_size)
 
     model = FID(loader.img_shp,
                 loader.output_size,
@@ -135,7 +145,7 @@ def train_fid_model(args, fid_type='conv', batch_size=32):
     return model
 
 class InceptionV3UptoPool3(nn.Module):
-    def __init__(self, num_classes=1000, transform_input=False):
+    def __init__(self, num_classes=1000, transform_input=True):
         super(InceptionV3UptoPool3, self).__init__()
         self.transform_input = transform_input
         self.Conv2d_1a_3x3 = BasicConv2d(3, 32, kernel_size=3, stride=2)
@@ -151,6 +161,7 @@ class InceptionV3UptoPool3(nn.Module):
         self.Mixed_6c = InceptionC(768, channels_7x7=160)
         self.Mixed_6d = InceptionC(768, channels_7x7=160)
         self.Mixed_6e = InceptionC(768, channels_7x7=192)
+        self.AuxLogits = InceptionAux(768, num_classes)
         self.Mixed_7a = InceptionD(768)
         self.Mixed_7b = InceptionE(1280)
         self.Mixed_7c = InceptionE(2048)
@@ -259,14 +270,14 @@ class FID(nn.Module):
 
     def _build_inception(self):
         if self.fid_type == 'inceptionv3':
-            print("building inception_v3 FID model")
+            print("compiling inception_v3 FID model")
             model = nn.Sequential(
                 BWtoRGB(),
                 nn.Upsample(size=[299, 299], mode='bilinear'),
-                InceptionV3UptoPool3(self.output_size)
+                InceptionV3UptoPool3()#self.output_size)
             )
         else:
-            print("building standard convnet FID model")
+            print("compiling standard convnet FID model")
             model = ConvFID(self.input_shape, self.output_size)
 
         # push to multi-gpu
@@ -281,12 +292,19 @@ class FID(nn.Module):
 
     def load(self):
         # load the FID model if it exists
-        if os.path.isdir(".models"):
-            model_filename = os.path.join(".models", self.get_name() + ".th")
-            if os.path.isfile(model_filename):
-                print("loading existing FID model")
-                self.load_state_dict(torch.load(model_filename))
-                return True
+        if self.fid_type == 'inceptionv3':
+            # load the state dict from the zoo
+            model_url = 'https://download.pytorch.org/models/inception_v3_google-1a9a5a14.pth'
+            self.model[-1].load_state_dict(model_zoo.load_url(model_url))
+            print("successfully loaded inceptionv3")
+            return True
+        else:
+            if os.path.isdir(".models"):
+                model_filename = os.path.join(".models", self.get_name() + ".th")
+                if os.path.isfile(model_filename):
+                    print("loading existing FID model")
+                    self.load_state_dict(torch.load(model_filename))
+                    return True
 
         return False
 
