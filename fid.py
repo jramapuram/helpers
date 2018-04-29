@@ -299,8 +299,8 @@ class FID(nn.Module):
             print("successfully loaded inceptionv3")
             return True
         else:
-            if os.path.isdir(".models"):
-                model_filename = os.path.join(".models", self.get_name() + ".th")
+            if os.path.isdir(self.config['model_dir']):
+                model_filename = os.path.join(self.config['model_dir'], self.get_name() + ".th")
                 if os.path.isfile(model_filename):
                     print("loading existing FID model")
                     self.load_state_dict(torch.load(model_filename))
@@ -310,8 +310,8 @@ class FID(nn.Module):
 
     def save(self, overwrite=False):
         # save the FID model if it doesnt exist
-        check_or_create_dir(".models")
-        model_filename = os.path.join(".models", self.get_name() + ".th")
+        check_or_create_dir(self.config['model_dir'])
+        model_filename = os.path.join(self.config['model_dir'], self.get_name() + ".th")
         if not os.path.isfile(model_filename) or overwrite:
             print("saving existing FID model")
             torch.save(self.state_dict(), model_filename)
