@@ -108,10 +108,7 @@ def train_fid_model(args, fid_type='conv', batch_size=32):
     ''' builds and trains a classifier '''
     loader = get_loader(args)
     if isinstance(loader, list): # has a sequential loader
-        if fid_type == 'conv':
-            loader = label_offset_merger(loader, batch_size, args.cuda)
-        else:
-            loader = simple_merger(loader, batch_size, args.cuda)
+        loader = simple_merger(loader, batch_size, args.cuda)
 
     # debug prints
     print("[FID] train = ", num_samples_in_loader(loader.train_loader),
@@ -139,7 +136,9 @@ def train_fid_model(args, fid_type='conv', batch_size=32):
 
     # test one final time to check accuracy .
     # this is useful to validate loaded models
-    test(epoch=-1, model=model, data_loader=loader, args=args)
+    # Doesn't make sense for pretrained inceptionv3
+    if fid_type == 'conv':
+        test(epoch=-1, model=model, data_loader=loader, args=args)
 
     del loader # force cleanup
     return model
@@ -239,7 +238,8 @@ class ConvFID(nn.Module):
         super(ConvFID, self).__init__()
         self.input_shape = input_shape
         self.output_size = output_size
-        model = build_conv_encoder(self.input_shape, self.output_size)
+        model = build_conv_encoder(self.input_shape, self.output_size,
+                                   normalization_str="batchnorm")
         self.first_section = model[0:-4] # extract a feature layer
         self.second_section = model[-4:]
 
@@ -299,8 +299,8 @@ class FID(nn.Module):
             print("successfully loaded inceptionv3")
             return True
         else:
-            if os.path.isdir(self.config['model_dir']):
-                model_filename = os.path.join(self.config['model_dir'], self.get_name() + ".th")
+            if os.path.isdir(self.config['fid_model_dir']):
+                model_filename = os.path.join(self.config['fid_model_dir'], self.get_name() + ".th")
                 if os.path.isfile(model_filename):
                     print("loading existing FID model")
                     self.load_state_dict(torch.load(model_filename))
@@ -310,8 +310,8 @@ class FID(nn.Module):
 
     def save(self, overwrite=False):
         # save the FID model if it doesnt exist
-        check_or_create_dir(self.config['model_dir'])
-        model_filename = os.path.join(self.config['model_dir'], self.get_name() + ".th")
+        check_or_create_dir(self.config['fid_model_dir'])
+        model_filename = os.path.join(self.config['fid_model_dir'], self.get_name() + ".th")
         if not os.path.isfile(model_filename) or overwrite:
             print("saving existing FID model")
             torch.save(self.state_dict(), model_filename)

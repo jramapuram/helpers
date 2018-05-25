@@ -39,11 +39,9 @@ def squeeze_expand_dim(tensor, axis):
     return tensor
 
 
-def invert_shuffle(arr, perm):
-    for _ in range(arr.size(0) - 1):
-        arr = arr[perm]
-
-    return arr
+def inv_perm(arr, perm):
+    idx_perm = torch.cat([(perm == i).nonzero() for i in range(len(perm))], 0).squeeze()
+    return arr[idx_perm]
 
 
 def normalize_images(imgs, mu=None, sigma=None, eps=1e-9):
@@ -406,6 +404,11 @@ def long_type(use_cuda):
 def oneplus(x):
     return F.softplus(x, beta=1)
 
+def number_of_parameters(model, only_required_grad=False):
+    if only_required_grad:
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 def add_weight_norm(module):
     params = [p[0] for p in module.named_parameters()]
@@ -416,28 +419,6 @@ def add_weight_norm(module):
                 module, param)
 
     return module
-
-
-def str_to_activ(str_activ):
-    ''' Helper to return a tf activation given a str'''
-    str_activ = str_activ.strip().lower()
-    activ_map = {
-        'elu': F.elu,
-        'sigmoid': F.sigmoid,
-        'tanh': F.tanh,
-        'oneplus': oneplus,
-        'softmax': F.softmax,
-        'log_softmax': F.log_softmax,
-        'selu': F.selu,
-        'relu': F.relu,
-        'softplus': F.softplus,
-        'hardtanh': F.hardtanh,
-        'leaky_relu': F.leaky_relu,
-        'softsign': F.softsign
-    }
-
-    assert str_activ in activ_map, "unknown activation requested"
-    return activ_map[str_activ]
 
 
 def check_or_create_dir(dir_path):

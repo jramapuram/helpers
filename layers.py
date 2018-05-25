@@ -16,11 +16,19 @@ class View(nn.Module):
 
 
 class Identity(nn.Module):
-    def __init__(self):
+    def __init__(self, inplace=True):
         super(Identity, self).__init__()
 
     def forward(self, x):
         return x
+
+
+class OnePlus(nn.Module):
+    def __init__(self, inplace=True):
+        super(Identity, self).__init__()
+
+    def forward(self, x):
+        return F.softplus(x, beta=1)
 
 
 class BWtoRGB(nn.Module):
@@ -52,6 +60,55 @@ class MaskedConv2d(nn.Conv2d):
         return super(MaskedConv2d, self).forward(x)
 
 
+class GatedConv2d(nn.Module):
+    '''from jmtomczak's github '''
+    def __init__(self, input_channels, output_channels, kernel_size,
+                 stride, padding=0, dilation=1, activation=None):
+        super(GatedConv2d, self).__init__()
+
+        self.activation = activation
+        self.sigmoid = nn.Sigmoid()
+
+        self.h = nn.Conv2d(input_channels, output_channels, kernel_size,
+                           stride=stride, padding=padding, dilation=dilation)
+        self.g = nn.Conv2d(input_channels, output_channels, kernel_size,
+                           stride=stride, padding=padding, dilation=dilation)
+
+    def forward(self, x):
+        if self.activation is None:
+            h = self.h(x)
+        else:
+            h = self.activation( self.h( x ) )
+
+        g = self.sigmoid( self.g( x ) )
+
+        return h * g
+
+
+class GatedConvTranspose2d(nn.Module):
+    ''' from jmtomczak's github'''
+    def __init__(self, input_channels, output_channels, kernel_size,
+                 stride, padding=0, dilation=1, activation=None):
+        super(GatedConvTranspose2d, self).__init__()
+
+        self.activation = activation
+        self.sigmoid = nn.Sigmoid()
+        self.h = nn.ConvTranspose2d(input_channels, output_channels, kernel_size,
+                                    stride=stride, padding=padding, dilation=dilation)
+        self.g = nn.ConvTranspose2d(input_channels, output_channels, kernel_size,
+                                    stride=stride, padding=padding, dilation=dilation)
+
+    def forward(self, x):
+        if self.activation is None:
+            h = self.h(x)
+        else:
+            h = self.activation( self.h( x ) )
+
+        g = self.sigmoid( self.g( x ) )
+
+        return h * g
+
+
 class EarlyStopping(object):
     def __init__(self, model, max_steps=10, burn_in_interval=None, save_best=True):
         self.max_steps = max_steps
@@ -68,22 +125,23 @@ class EarlyStopping(object):
         self.model.load()
 
     def __call__(self, loss):
+        if self.burn_in_interval is not None and self.iteration < self.burn_in_interval:
+            ''' don't save the model until the burn-in-interval has been exceeded'''
+            self.iteration += 1
+            return False
+
         if (loss < self.best_loss):
             self.stopping_step = 0
             self.best_loss = loss
             if self.save_best:
                 self.model.save(overwrite=True)
         else:
-            if self.burn_in_interval is not None and self.iteration > self.burn_in_interval:
-                # want burn in and ensure threshold has been met
-                self.stopping_step += 1
-            elif self.burn_in_interval is None:
-                # when we dont want burn in
-                self.stopping_step += 1
+            self.stopping_step += 1
 
         is_early_stop = False
         if self.stopping_step >= self.max_steps:
-            print("Early stopping is triggered;  loss:{} | iter: {}".format(loss, self.iteration))
+            print("Early stopping is triggered;  current_loss:{} --> best_loss:{} | iter: {}".format(
+                loss, self.best_loss, self.iteration))
             is_early_stop = True
 
         self.iteration += 1
@@ -354,6 +412,53 @@ class Dense(nn.Module):
         return nn.Sequential(OrderedDict(layers))
 
 
+def str_to_activ_module(str_activ):
+    ''' Helper to return a tf activation given a str'''
+    str_activ = str_activ.strip().lower()
+    activ_map = {
+        'identity': Identity,
+        'elu': nn.ELU,
+        'sigmoid': nn.Sigmoid,
+        'log_sigmoid': nn.LogSigmoid,
+        'tanh': nn.Tanh,
+        'oneplus': OnePlus,
+        'softmax': nn.Softmax,
+        'log_softmax': nn.LogSoftmax,
+        'selu': nn.SELU,
+        'relu': nn.ReLU,
+        'softplus': nn.Softplus,
+        'hardtanh': nn.Hardtanh,
+        'leaky_relu': nn.LeakyReLU,
+        'softsign': nn.Softsign
+    }
+
+    assert str_activ in activ_map, "unknown activation requested"
+    return activ_map[str_activ]
+
+
+def str_to_activ(str_activ):
+    ''' Helper to return a tf activation given a str'''
+    str_activ = str_activ.strip().lower()
+    activ_map = {
+        'identity': lambda x: x,
+        'elu': F.elu,
+        'sigmoid': F.sigmoid,
+        'tanh': F.tanh,
+        'oneplus': oneplus,
+        'softmax': F.softmax,
+        'log_softmax': F.log_softmax,
+        'selu': F.selu,
+        'relu': F.relu,
+        'softplus': F.softplus,
+        'hardtanh': F.hardtanh,
+        'leaky_relu': F.leaky_relu,
+        'softsign': F.softsign
+    }
+
+    assert str_activ in activ_map, "unknown activation requested"
+    return activ_map[str_activ]
+
+
 def build_image_downsampler(img_shp, new_shp,
                             stride=[3, 3],
                             padding=[0, 0]):
@@ -405,54 +510,175 @@ def build_relational_conv_encoder(input_shape, filter_depth=32,
 
 
 def build_pixelcnn_decoder(input_size, output_shape, filter_depth=32,
-                           activation_fn=nn.ELU, bilinear_size=(32, 32)):
+                           activation_fn=nn.ELU, bilinear_size=(32, 32),
+                           normalization_str="none"):
     ''' from jmtomczak's github '''
 
     # self.conv = nn.Conv2d(input_channels, output_channels, kernel_size, stride, padding, dilation, bias=bias)
     # self.p_x_mean = Conv2d(64, 1, 1, 1, 0, activation=nn.Sigmoid())
-    # def __init__(self, input_channels, output_channels, kernel_size, stride, padding, dilation=1, activation=None, bias=True):
+    # def __init__(self, input_channels, output_channels, kernel_size,
+    #              stride, padding, dilation=1, activation=None, bias=True):
 
     chans = output_shape[0]
     act = nn.ReLU(True)
     return nn.Sequential(
         MaskedConv2d('A', input_size, 64, 3, 1, 1, bias=False),
-        nn.BatchNorm2d(64), act,
-        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False), nn.BatchNorm2d(64), act,
-        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False), nn.BatchNorm2d(64), act,
-        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False), nn.BatchNorm2d(64), act,
-        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False), nn.BatchNorm2d(64), act,
-        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False), nn.BatchNorm2d(64), act,
-        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False), nn.BatchNorm2d(64), act,
-        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False), nn.BatchNorm2d(64), act,
+        add_normalization(normalization_str, 2, 64, num_groups=32), act,
+        # nn.BatchNorm2d(64), act,
+        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False),
+        add_normalization(normalization_str, 2, 64, num_groups=32), act,
+        #nn.BatchNorm2d(64), act,
+        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False),
+        #nn.BatchNorm2d(64), act,
+        add_normalization(normalization_str, 2, 64, num_groups=32), act,
+        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False),
+        #nn.BatchNorm2d(64), act,
+        add_normalization(normalization_str, 2, 64, num_groups=32), act,
+        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False),
+        add_normalization(normalization_str, 2, 64, num_groups=32), act,
+        #nn.BatchNorm2d(64), act,
+        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False),
+        add_normalization(normalization_str, 2, 64, num_groups=32), act,
+        #nn.BatchNorm2d(64), act,
+        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False),
+        add_normalization(normalization_str, 2, 64, num_groups=32), act,
+        #nn.BatchNorm2d(64), act,
+        MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False),
+        add_normalization(normalization_str, 2, 64, num_groups=32), act,
+        #nn.BatchNorm2d(64), act,
         nn.Conv2d(64, chans, 1, 1, 0, dilation=1, bias=True)
     )
 
 
+def add_normalization(normalization_str, ndims, nfeatures, **kwargs):
+    norm_map = {
+        'batchnorm': {
+            1: nn.BatchNorm1d(nfeatures),
+            2: nn.BatchNorm2d(nfeatures),
+            3: nn.BatchNorm3d(nfeatures)
+        },
+        'groupnorm': {
+            2: nn.GroupNorm(kwargs['num_groups'], nfeatures)
+        },
+        'instancenorm': {
+            1: nn.InstanceNorm1d(nfeatures),
+            2: nn.InstanceNorm2d(nfeatures),
+            3: nn.InstanceNorm3d(nfeatures)
+        },
+        'none': {
+            1: Identity(),
+            2: Identity(),
+            3: Identity()
+        }
+    }
+
+    if normalization_str == 'groupnorm':
+        assert 'num_groups' in kwargs, "need to specify groups for GN"
+        assert ndims > 1, "group norm needs channels to operate"
+
+    return norm_map[normalization_str][ndims]
+
+
+def build_gated_conv_encoder(input_shape, output_size, filter_depth=32,
+                             activation_fn=Identity, bilinear_size=(32, 32),
+                             normalization_str="none"):
+    print('building gated conv encoder...')
+    upsampler = nn.Upsample(size=bilinear_size, mode='bilinear')
+    chans = input_shape[0]
+    return nn.Sequential(
+        upsampler if input_shape[1:] != bilinear_size else Identity(),
+        # input dim: num_channels x 32 x 32
+        GatedConv2d(chans, filter_depth, 5, stride=1),
+        add_normalization(normalization_str, 2, filter_depth, num_groups=32),
+        activation_fn(inplace=True),
+        # state dim: 32 x 28 x 28
+        GatedConv2d(filter_depth, filter_depth*2, 4, stride=2),
+        add_normalization(normalization_str, 2, filter_depth*2, num_groups=32),
+        activation_fn(inplace=True),
+        # state dim: 64 x 13 x 13
+        GatedConv2d(filter_depth*2, filter_depth*4, 4, stride=1),
+        add_normalization(normalization_str, 2, filter_depth*4, num_groups=32),
+        activation_fn(inplace=True),
+        # state dim: 128 x 10 x 10
+        GatedConv2d(filter_depth*4, filter_depth*8, 4, stride=2),
+        add_normalization(normalization_str, 2, filter_depth*8, num_groups=32),
+        activation_fn(inplace=True),
+        # state dim: 256 x 4 x 4
+        GatedConv2d(filter_depth*8, filter_depth*16, 4, stride=1),
+        add_normalization(normalization_str, 2, filter_depth*16, num_groups=32),
+        activation_fn(inplace=True),
+        # state dim: 512 x 1 x 1
+        GatedConv2d(filter_depth*16, filter_depth*16, 1, stride=1),
+        add_normalization(normalization_str, 2, filter_depth*16, num_groups=32),
+        activation_fn(inplace=True),
+        # state dim: 512 x 1 x 1
+        GatedConv2d(filter_depth*16, output_size, 1, stride=1),
+        # output dim: opt.z_dim x 1 x 1
+        View([-1, output_size])
+    )
+
+
+def build_gated_conv_decoder(input_size, output_shape, filter_depth=32,
+                             activation_fn=Identity, bilinear_size=(32, 32),
+                             normalization_str="none"):
+    print('building gated conv decoder...')
+    chans = output_shape[0]
+    upsampler = nn.Upsample(size=output_shape[1:], mode='bilinear')
+    return nn.Sequential(
+        View([-1, input_size, 1, 1]),
+        # input dim: z_dim x 1 x 1
+        GatedConvTranspose2d(input_size, filter_depth*8, 4, stride=1),
+        add_normalization(normalization_str, 2, filter_depth*8, num_groups=32),
+        activation_fn(inplace=True),
+        # state dim:   256 x 4 x 4
+        GatedConvTranspose2d(filter_depth*8, filter_depth*4, 4, stride=2),
+        add_normalization(normalization_str, 2, filter_depth*4, num_groups=32),
+        activation_fn(inplace=True),
+        # state dim: 128 x 10 x 10
+        GatedConvTranspose2d(filter_depth*4, filter_depth*2, 4, stride=1),
+        add_normalization(normalization_str, 2, filter_depth*2, num_groups=32),
+        activation_fn(inplace=True),
+        # state dim: 64 x 13 x 13
+        GatedConvTranspose2d(filter_depth*2, filter_depth, 4, stride=2),
+        add_normalization(normalization_str, 2, filter_depth, num_groups=32),
+        activation_fn(inplace=True),
+        # state dim: 32 x 28 x 28
+        GatedConvTranspose2d(filter_depth, filter_depth, 5, stride=1),
+        add_normalization(normalization_str, 2, filter_depth, num_groups=32),
+        activation_fn(inplace=True),
+        # state dim: 32 x 32 x 32
+        nn.Conv2d(filter_depth, chans, 1, stride=1),
+        # output dim: num_channels x 32 x 32
+        upsampler if output_shape[1:] != bilinear_size else Identity()
+    )
+
+
 def build_conv_decoder(input_size, output_shape, filter_depth=32,
-                       activation_fn=nn.ELU, bilinear_size=(32, 32)):
+                       activation_fn=nn.ELU, bilinear_size=(32, 32),
+                       normalization_str='none'):
     chans = output_shape[0]
     upsampler = nn.Upsample(size=output_shape[1:], mode='bilinear')
     return nn.Sequential(
         View([-1, input_size, 1, 1]),
         # input dim: z_dim x 1 x 1
         nn.ConvTranspose2d(input_size, filter_depth*8, 4, stride=1, bias=True),
-        nn.BatchNorm2d(filter_depth*8),
+        add_normalization(normalization_str, 2, filter_depth*8, num_groups=32),
         activation_fn(inplace=True),
         # state dim:   256 x 4 x 4
         nn.ConvTranspose2d(filter_depth*8, filter_depth*4, 4, stride=2, bias=True),
-        nn.BatchNorm2d(filter_depth*4),
+        add_normalization(normalization_str, 2, filter_depth*4, num_groups=32),
         activation_fn(inplace=True),
         # state dim: 128 x 10 x 10
         nn.ConvTranspose2d(filter_depth*4, filter_depth*2, 4, stride=1, bias=True),
-        nn.BatchNorm2d(filter_depth*2),
+        add_normalization(normalization_str, 2, filter_depth*2, num_groups=32),
         activation_fn(inplace=True),
         # state dim: 64 x 13 x 13
         nn.ConvTranspose2d(filter_depth*2, filter_depth, 4, stride=2, bias=True),
-        nn.BatchNorm2d(filter_depth),
+        add_normalization(normalization_str, 2, filter_depth, num_groups=32),
         activation_fn(inplace=True),
         # state dim: 32 x 28 x 28
         nn.ConvTranspose2d(filter_depth, filter_depth, 5, stride=1, bias=True),
-        nn.BatchNorm2d(filter_depth),
+        add_normalization(normalization_str, 2, filter_depth, num_groups=32),
         activation_fn(inplace=True),
         # state dim: 32 x 32 x 32
         nn.Conv2d(filter_depth, chans, 1, stride=1, bias=True),
@@ -461,35 +687,37 @@ def build_conv_decoder(input_size, output_shape, filter_depth=32,
     )
 
 
+
 def build_conv_encoder(input_shape, output_size, filter_depth=32,
-                       activation_fn=nn.ELU, bilinear_size=(32, 32)):
+                       activation_fn=nn.ELU, bilinear_size=(32, 32),
+                       normalization_str="none"):
     upsampler = nn.Upsample(size=bilinear_size, mode='bilinear')
     chans = input_shape[0]
     return nn.Sequential(
         upsampler if input_shape[1:] != bilinear_size else Identity(),
         # input dim: num_channels x 32 x 32
         nn.Conv2d(chans, filter_depth, 5, stride=1, bias=True),
-        nn.BatchNorm2d(filter_depth),
+        add_normalization(normalization_str, 2, filter_depth, num_groups=32),
         activation_fn(inplace=True),
         # state dim: 32 x 28 x 28
         nn.Conv2d(filter_depth, filter_depth*2, 4, stride=2, bias=True),
-        nn.BatchNorm2d(filter_depth*2),
+        add_normalization(normalization_str, 2, filter_depth*2, num_groups=32),
         activation_fn(inplace=True),
         # state dim: 64 x 13 x 13
         nn.Conv2d(filter_depth*2, filter_depth*4, 4, stride=1, bias=True),
-        nn.BatchNorm2d(filter_depth*4),
+        add_normalization(normalization_str, 2, filter_depth*4, num_groups=32),
         activation_fn(inplace=True),
         # state dim: 128 x 10 x 10
         nn.Conv2d(filter_depth*4, filter_depth*8, 4, stride=2, bias=True),
-        nn.BatchNorm2d(filter_depth*8),
+        add_normalization(normalization_str, 2, filter_depth*8, num_groups=32),
         activation_fn(inplace=True),
         # state dim: 256 x 4 x 4
         nn.Conv2d(filter_depth*8, filter_depth*16, 4, stride=1, bias=True),
-        nn.BatchNorm2d(filter_depth*16),
+        add_normalization(normalization_str, 2, filter_depth*16, num_groups=32),
         activation_fn(inplace=True),
         # state dim: 512 x 1 x 1
         nn.Conv2d(filter_depth*16, filter_depth*16, 1, stride=1, bias=True),
-        nn.BatchNorm2d(filter_depth*16),
+        add_normalization(normalization_str, 2, filter_depth*16, num_groups=32),
         activation_fn(inplace=True),
         # state dim: 512 x 1 x 1
         nn.Conv2d(filter_depth*16, output_size, 1, stride=1, bias=True),
@@ -497,28 +725,28 @@ def build_conv_encoder(input_shape, output_size, filter_depth=32,
         View([-1, output_size])
     )
 
-def build_dense_encoder(input_shape, output_size, latent_size=512, activation_fn=nn.ELU):
+def build_dense_encoder(input_shape, output_size, latent_size=512, activation_fn=nn.ELU, normalization_str="none"):
     input_flat = int(np.prod(input_shape))
     output_flat = int(np.prod(output_size))
     output_size = [output_size] if not isinstance(output_size, list) else output_size
     return nn.Sequential(
         View([-1, input_flat]),
         nn.Linear(input_flat, latent_size),
-        nn.BatchNorm1d(latent_size),
+        add_normalization(normalization_str, 1, latent_size, num_groups=32),
         activation_fn(),
         nn.Linear(latent_size, output_flat),
         View([-1, *output_size])
     )
 
-def build_dense_decoder(input_size, output_shape, latent_size=512, activation_fn=nn.ELU):
+def build_dense_decoder(input_size, output_shape, latent_size=512, activation_fn=nn.ELU, normalization_str="none"):
     input_flat = int(np.prod(input_size))
     return nn.Sequential(
         View([-1, input_flat]),
         nn.Linear(input_flat, latent_size),
-        nn.BatchNorm1d(latent_size),
+        add_normalization(normalization_str, 1, latent_size, num_groups=32),
         activation_fn(),
         nn.Linear(latent_size, latent_size),
-        nn.BatchNorm1d(latent_size),
+        add_normalization(normalization_str, 1, latent_size, num_groups=32),
         activation_fn(),
         nn.Linear(latent_size, int(np.prod(output_shape))),
         View([-1] + output_shape)

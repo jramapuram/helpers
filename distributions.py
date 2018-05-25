@@ -4,20 +4,22 @@ import torch.distributions as D
 
 from .utils import ones_like
 
-def log_logistic_256(x, mean, log_s, average=False, dim=None):
+
+def log_logistic_256(x, mean, logvar, average=False, reduce=True, dim=None):
     ''' from jmtomczak's github'''
-    binsize, scale = 1. / 256., torch.exp(log_s)
-    x = torch.floor(x/binsize) * binsize  # make sure image fit proper values
-    x_plus = (x + binsize - mean) / scale # calculate normalized values for a bin
-    x_minus = (x - mean) / scale
-    cdf_plus = F.sigmoid(x_plus)          # calculate logistic CDF for a bin
-    cdf_minus = F.sigmoid(x_minus)
+    bin_size, scale = 1. / 256., torch.exp(logvar)
+    x = (torch.floor(x / bin_size) * bin_size - mean) / scale
+    cdf_plus = F.sigmoid(x + bin_size/scale)
+    cdf_minus = F.sigmoid(x)
 
     # calculate final log-likelihood for an image
-    # and return a mean or sum
-    likelihood = - torch.log(cdf_plus - cdf_minus + 1.e-7)
-    reduction_fn = torch.mean if average else torch.sum
-    return reduction_fn(likelihood, dim )
+    log_logist_256 = - torch.log(cdf_plus - cdf_minus + 1.e-7)
+
+    if reduce:
+        reduction_fn = torch.mean if average else torch.sum
+        return reduction_fn(log_logist_256, dim)
+
+    return log_logist_256
 
 
 def nll_activation(logits, nll_type):

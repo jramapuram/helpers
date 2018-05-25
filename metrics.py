@@ -7,7 +7,7 @@ from scipy import linalg
 from torch.autograd import Variable
 
 from .utils import to_data, float_type, \
-    num_samples_in_loader, zero_pad_smaller_cat
+    num_samples_in_loader, zero_pad_smaller_cat, zeros_like
 
 
 def softmax_correct(preds, targets):
@@ -50,6 +50,7 @@ def frechet_gauss_gauss_np(synthetic_features, test_features, eps=1e-6):
         if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-2):
             m = np.max(np.abs(covmean.imag))
             raise ValueError("Imaginary component {}".format(m))
+
         covmean = covmean.real
 
     tr_covmean = np.trace(covmean)
@@ -82,7 +83,9 @@ def calculate_fid(fid_model, model, loader, grapher,
                                               data_loader=loader,
                                               num_samples=num_samples,
                                               cuda=cuda)
-    grapher.vis.text(str(fid), opts=dict(title="FID"))
+    if grapher:
+        grapher.vis.text(str(fid), opts=dict(title="FID"))
+
     return fid
 
 
@@ -107,7 +110,7 @@ def calculate_fid_from_generated_images(fid_model, model, data_loader,
             assert fid_model.batch_size <= batch_size
             for begin, end in zip(range(0, batch_size, fid_model.batch_size),
                                   range(fid_model.batch_size, batch_size+1, fid_model.batch_size)):
-                generated = model.generate_synthetic_samples(model.student, batch_size)
+                generated = model.generate_synthetic_samples(model.student, batch_size, soft_prior=False)
                 _, test_features = fid_model(data[begin:end])
                 _, generated_features = fid_model(generated[begin:end])
                 test_features = test_features.view(fid_model.batch_size, -1)
@@ -206,26 +209,29 @@ def calculate_consistency(model, loader, reparam_type, vae_type, cuda=False):
     return np.asarray([consistency])
 
 
-def estimate_fisher(model, data_loader, batch_size, sample_size=1024, cuda=False):
-    # modified from github user kuc2477's code
-    # sample loglikelihoods from the dataset.
-    loglikelihoods = []
+def estimate_fisher(model, data_loader, batch_size, sample_size=10000, cuda=False):
+    model.eval() # lock BN / dropout, etc
+    diag_fisher = {k: zeros_like(param) for (k, param) in model.named_parameters()}
+    #num_samples_in_dataset = num_samples_in_loader(data_loader.train_loader)
+    num_observed_samples = 0
+
     for x, _ in data_loader.train_loader:
+        model.zero_grad()
         x = Variable(x).cuda() if cuda else Variable(x)
         reconstr_x, params = model(x)
-        loss_teacher = model.loss_function(reconstr_x, x, params)
-        loglikelihoods.append(
-            loss_teacher['loss']
-        )
-        if len(loglikelihoods) >= sample_size // batch_size:
-            break
+        loss = model.loss_function(reconstr_x, x, params)
+        for i in range(x.size(0)):
+            model.zero_grad()
+            loss['loss'][i].backward(retain_graph=True)
+            for k, v in model.named_parameters():
+                diag_fisher[k] += v.grad.data ** 2 #/ num_samples_in_dataset
 
-    # estimate the fisher information of the parameters.
-    loglikelihood = torch.cat(loglikelihoods, 0).mean(0)
-    loglikelihood_grads = torch.autograd.grad(
-        loglikelihood, model.parameters()
-    )
-    parameter_names = [
-        n.replace('.', '__') for n, p in model.named_parameters()
-    ]
-    return {n: g**2 for n, g in zip(parameter_names, loglikelihood_grads)}
+            num_observed_samples += 1
+            if num_observed_samples > sample_size:
+                break
+
+    for k in diag_fisher.keys():
+        diag_fisher[k] /= num_observed_samples
+        diag_fisher[k].requires_grad = False
+
+    return diag_fisher
