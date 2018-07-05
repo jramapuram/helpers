@@ -114,41 +114,7 @@ def is_cuda(tensor_or_var):
 
 
 def zeros_like(tensor):
-    shp = tensor.size()
-    cuda = is_cuda(tensor)
-    is_var = type(tensor) == Variable
-
-    try: # pytorch 0.4.0a0+108f5c1 +
-        tensor_type = to_data(tensor).type()
-        dtype_map = {
-            'torch.cuda.FloatTensor': float_type(cuda)(*shp).zero_(),
-            'torch.FloatTensor': float_type(cuda)(*shp).zero_(),
-             # TODO: fix this! half type is not generating zeros properly in 0.4
-             #       change to: half_type(cuda)(*shp).zero_(),
-            'torch.cuda.HalfTensor': float_type(cuda)(*shp).zero_().type(half_type(cuda)),
-            'torch.HalfTensor': float_type(cuda)(*shp).zero_().type(half_type(cuda)),
-            'torch.cuda.LongTensor': long_type(cuda)(*shp).zero_(),
-            'torch.LongTensor': long_type(cuda)(*shp).zero_(),
-            'torch.cuda.IntTensor': int_type(cuda)(*shp).zero_(),
-            'torch.IntTensor': int_type(cuda)(*shp).zero_()
-        }
-        zeros = dtype_map[tensor_type]
-    except:
-        # older pytorch versions
-        tensor_type = type(to_data(tensor))
-        if tensor_type == float_type(cuda):
-            zeros = float_type(cuda)(*shp).zero_()
-        elif tensor_type == int_type(cuda):
-            zeros = int_type(cuda)(*shp).zero_()
-        elif tensor_type == long_type(cuda):
-            zeros = long_type(cuda)(*shp).zero_()
-        elif tensor_type == half_type(cuda):
-            zeros = half_type(cuda)(*shp).zero_()
-        else:
-            raise Exception("unsuported type passed to zeros: ", tensor_type)
-
-    return zeros if not is_var else Variable(zeros)
-
+    return torch.zeros_like(tensor)
 
 def ones(shape, cuda, dtype='float32'):
     shape = list(shape) if isinstance(shape, tuple) else shape
@@ -226,7 +192,7 @@ def eye(num_elems, cuda, dtype='float32'):
 
 
 def ones_like(tensor):
-    return zeros_like(tensor) + 1
+    return torch.ones_like(tensor)
 
 def scale(val, src, dst):
     """Helper to scale val from src range to dst range
@@ -468,6 +434,16 @@ def convert_bn_to_float(module):
 
 def network_to_half(network):
     return convert_bn_to_float(network.half())
+
+
+def nan_check_and_break(tensor, name=""):
+    if torch.sum(torch.isnan(tensor)) > 0:
+        print("tensor {} of {} dim was NaN!!".format(name, tensor.shape))
+        exit(-1)
+
+    if torch.sum(tensor == np.inf) > 0:
+        print("tensor {} of {} dim was INF!!".format(name, tensor.shape))
+        exit(-1)
 
 
 def register_nan_checks(model):
