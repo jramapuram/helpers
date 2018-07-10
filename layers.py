@@ -3,7 +3,7 @@ import torch.nn as nn
 import numpy as np
 from collections import OrderedDict
 
-from .utils import check_or_create_dir
+from .utils import check_or_create_dir, same_type
 
 
 class View(nn.Module):
@@ -129,6 +129,105 @@ class GatedConvTranspose2d(nn.Module):
         g = self.sigmoid( self.g( x ) )
 
         return h * g
+
+
+class RNNImageClassifier(nn.Module):
+    def __init__(self, input_shape, output_size, latent_size=256,
+                 n_layers=2, bidirectional=False, rnn_type="lstm",
+                 normalization_str="none", bias=True, dropout=0,
+                 cuda=False, half=False):
+        super(RNNImageClassifier, self).__init__()
+        self.cuda = cuda
+        self.half = half
+        self.input_shape = input_shape
+        self.latent_size = latent_size
+        self.output_size = output_size
+        self.n_layers = n_layers
+        self.rnn_type = rnn_type
+        self.chans = input_shape[0]
+        self.bidirectional = bidirectional
+
+        # build the models
+        self.feature_extractor = build_conv_encoder(input_shape, latent_size,
+                                                    normalization_str=normalization_str)
+        self.rnn = self._build_rnn(latent_size, bias=bias, dropout=dropout)
+        self.output_projector = build_dense_encoder(latent_size, output_size,
+                                                    normalization_str=normalization_str, nlayers=2)
+        self.state = None
+
+    def _build_rnn(self, latent_size, model_type='lstm', bias=True, dropout=False):
+        if self.half:
+            import apex
+
+        model_fn_map = {
+            'gru': torch.nn.GRU if not self.half else apex.RNN.GRU,
+            'lstm': torch.nn.LSTM if not self.half else apex.RNN.LSTM,
+        }
+        rnn = model_fn_map[model_type](
+            input_size=latent_size,
+            hidden_size=latent_size,
+            num_layers=self.n_layers,
+            batch_first=True,
+            bidirectional=self.bidirectional,
+            bias=bias, dropout=dropout
+        )
+
+        if self.cuda and not self.half:
+            rnn.flatten_parameters()
+
+        return rnn
+
+    def forward_rnn(self, x, reset_state=False, return_outputs=False):
+        if self.state is None or reset_state:
+            self.state = init_state(n_layers=self.n_layers,
+                                    batch_size=x.size(0),
+                                    hidden_size=self.latent_size,
+                                    rnn_type=self.rnn_type,
+                                    bidirectional=self.bidirectional,
+                                    half=self.half, cuda=self.cuda)
+
+        features = self.feature_extractor(x)
+        if features.dim() < 3:
+            features = features.unsqueeze(1)
+
+        outputs, self.state = self.rnn(features, self.state)
+        return outputs if return_outputs else None
+
+    def forward_prediction(self, reduce_mean=True):
+        ''' predicts from the state, but first does a reduce over n_layers [ind 0]'''
+        reduce_fn = torch.mean if reduce_mean else torch.sum
+        state = self.state[0] if self.rnn_type == 'lstm' else self.state
+        return self.output_projector(reduce_fn(state, 0))
+
+    def forward(self, x, reset_state=False, reduce_mean=True):
+        ''' helper that does forward rnn and forward prediction '''
+        outputs = self.forward_rnn(x, reset_state, return_outputs=False)
+        return self.forward_prediction(reduce_mean=reduce_mean)
+
+
+def init_state(n_layers, batch_size, hidden_size, rnn_type='lstm',
+               bidirectional=False, noisy=False, half=False, cuda=False):
+    ''' return a single initialized state'''
+    def _init_state():
+        num_directions = 2 if bidirectional else 1
+        if noisy:
+            # nn.init.xavier_uniform_(
+            return same_type(half, cuda)(
+                num_directions * n_layers, batch_size, hidden_size
+            ).normal_(0, 0.01).requires_grad_(),
+
+        # return zeros if not a noisy state
+        return same_type(half, cuda)(
+            num_directions * n_layers, batch_size, hidden_size
+        ).zero_().requires_grad_()
+
+    if rnn_type == 'lstm':
+        return ( # LSTM state is (h, c)
+            _init_state(),
+            _init_state()
+        )
+
+    return _init_state()
 
 
 class EarlyStopping(object):
