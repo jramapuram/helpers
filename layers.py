@@ -134,7 +134,9 @@ class GatedConvTranspose2d(nn.Module):
 class RNNImageClassifier(nn.Module):
     def __init__(self, input_shape, output_size, latent_size=256,
                  n_layers=2, bidirectional=False, rnn_type="lstm",
-                 normalization_str="none", bias=True, dropout=0,
+                 conv_normalization_str="none",
+                 dense_normalization_str="none",
+                 bias=True, dropout=0,
                  cuda=False, half=False):
         super(RNNImageClassifier, self).__init__()
         self.cuda = cuda
@@ -148,11 +150,13 @@ class RNNImageClassifier(nn.Module):
         self.bidirectional = bidirectional
 
         # build the models
-        self.feature_extractor = build_conv_encoder(input_shape, latent_size,
-                                                    normalization_str=normalization_str)
+        self.feature_extractor = nn.Sequential(
+            build_conv_encoder(input_shape, latent_size,
+                               normalization_str=conv_normalization_str),
+            nn.SELU())
         self.rnn = self._build_rnn(latent_size, bias=bias, dropout=dropout)
         self.output_projector = build_dense_encoder(latent_size, output_size,
-                                                    normalization_str=normalization_str, nlayers=2)
+                                                    normalization_str=dense_normalization_str, nlayers=2)
         self.state = None
 
     def _build_rnn(self, latent_size, model_type='lstm', bias=True, dropout=False):
