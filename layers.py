@@ -604,15 +604,9 @@ def build_relational_conv_encoder(input_shape, filter_depth=32,
 def build_pixelcnn_decoder(input_size, output_shape, filter_depth=32,
                            activation_fn=nn.ELU, bilinear_size=(32, 32),
                            normalization_str="none"):
-    ''' from jmtomczak's github '''
-
-    # self.conv = nn.Conv2d(input_channels, output_channels, kernel_size, stride, padding, dilation, bias=bias)
-    # self.p_x_mean = Conv2d(64, 1, 1, 1, 0, activation=nn.Sigmoid())
-    # def __init__(self, input_channels, output_channels, kernel_size,
-    #              stride, padding, dilation=1, activation=None, bias=True):
-
+    ''' modified from jmtomczak's github '''
     chans = output_shape[0]
-    act = nn.ReLU(True)
+    act = nn.SELU(True)  # nn.ReLU(True)
     return nn.Sequential(
         add_normalization(MaskedConv2d('A', input_size, 64, 3, 1, 1, bias=False),
                           normalization_str, 2, 64, num_groups=32), act,

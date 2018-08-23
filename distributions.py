@@ -3,31 +3,19 @@ import torch.nn.functional as F
 import torch.distributions as D
 
 from .utils import ones_like
+from .pixel_cnn.utils import discretized_mix_logistic_loss, \
+    discretized_mix_logistic_loss_1d, sample_from_discretized_mix_logistic_1d, \
+    sample_from_discretized_mix_logistic
 
 
-def log_logistic_256(x, mean, logvar, average=False, reduce=True, dim=None):
-    ''' from jmtomczak's github'''
-    bin_size, scale = 1. / 256., torch.exp(logvar)
-    x = (torch.floor(x / bin_size) * bin_size - mean) / scale
-    cdf_plus = F.sigmoid(x + bin_size/scale)
-    cdf_minus = F.sigmoid(x)
-
-    # calculate final log-likelihood for an image
-    log_logist_256 = - torch.log(cdf_plus - cdf_minus + 1.e-7)
-
-    if reduce:
-        reduction_fn = torch.mean if average else torch.sum
-        return reduction_fn(log_logist_256, dim)
-
-    return log_logist_256
-
-
-def nll_activation(logits, nll_type):
+def nll_activation(logits, nll_type, **kwargs):
     ''' helper to activate logits based on the NLL '''
     if nll_type == "clamp":
-        num_half_chans = logits.size(1) // 2
-        logits_mu = logits[:, 0:num_half_chans, :, :]
-        return torch.clamp(logits_mu, min=0.+1./512., max=1.-1./512.)
+        fn = sample_from_discretized_mix_logistic_1d if logits.shape[1] == 1 \
+            else sample_from_discretized_mix_logistic
+        # ideally do this, but needs parameterization
+        # return fn(logits, **kwargs)
+        return fn(logits, nr_mix=10)
     elif nll_type == "gaussian":
         num_half_chans = logits.size(1) // 2
         logits_mu = logits[:, 0:num_half_chans, :, :]
@@ -38,11 +26,13 @@ def nll_activation(logits, nll_type):
     else:
         raise Exception("unknown nll provided")
 
+
 def nll(x, recon_x, nll_type):
     ''' helper to get the actual NLL evaluation '''
     nll_map = {
         "gaussian": nll_gaussian,
         "bernoulli": nll_bernoulli,
+        "laplace": nll_laplace,
         "clamp": nll_clamp
     }
     return nll_map[nll_type](x, recon_x)
@@ -57,14 +47,9 @@ def nll_bernoulli(x, recon_x_logits):
 
 
 def nll_clamp(x, recon):
-    ''' log-logistic with clamping '''
-    batch_size, num_half_chans = x.size(0), recon.size(1) // 2
-    recon_mu = recon[:, 0:num_half_chans, :, :].contiguous()
-    recon_logvar = recon[:, num_half_chans:, :, :].contiguous()
-    return log_logistic_256(x.view(batch_size, -1),
-                            torch.clamp(recon_mu.view(batch_size, -1), min=0.+1./512., max=1.-1./512.),
-                            F.hardtanh(recon_logvar.view(batch_size, -1), min_val=-4.5, max_val=0),
-                            dim=-1)
+    fn = discretized_mix_logistic_loss_1d if x.shape[1] == 1 \
+        else discretized_mix_logistic_loss
+    return fn(x, recon)
 
 
 def nll_laplace(x, recon):

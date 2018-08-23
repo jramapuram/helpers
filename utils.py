@@ -109,6 +109,10 @@ def append_to_csv(data, filename):
         np.savetxt(f, data, delimiter=",")
 
 
+def is_half(tensor):
+    return tensor.dtype == torch.float16
+
+
 def is_cuda(tensor_or_var):
     return tensor_or_var.is_cuda
 
@@ -118,72 +122,27 @@ def zeros_like(tensor):
 
 def ones(shape, cuda, dtype='float32'):
     shape = list(shape) if isinstance(shape, tuple) else shape
-    ones_map = {
-        'float32': float_type,
-        'float64': double_type,
-        'double': double_type,
-        'half': half_type,
-        'float16': half_type,
-        'int32': int_type,
-        'int64': long_type
-    }
-    return ones_map[dtype](cuda)(*shape).zero_() + 1
+    return type_map[dtype](cuda)(*shape).zero_() + 1
 
 
 def zeros(shape, cuda, dtype='float32'):
     shape = list(shape) if isinstance(shape, tuple) else shape
-    type_map = {
-        'float32': float_type,
-        'float64': double_type,
-        'double': double_type,
-        'half': half_type,
-        'float16': half_type,
-        'int32': int_type,
-        'int64': long_type
-    }
     return type_map[dtype](cuda)(*shape).zero_()
 
 
 def normal(shape, cuda, mean=0, sigma=1, dtype='float32'):
     shape = list(shape) if isinstance(shape, tuple) else shape
-    type_map = {
-        'float32': float_type,
-        'float64': double_type,
-        'double': double_type,
-        'half': half_type,
-        'float16': half_type,
-        'int32': int_type,
-        'int64': long_type
-    }
     return type_map[dtype](cuda)(*shape).normal_(mean, sigma)
 
 
 def discrete_uniform(shape, cuda, a=0, b=2, dtype='float32'):
     ''' NOTE: this generates discrete values up to b - 1'''
     shape = list(shape) if isinstance(shape, tuple) else shape
-    type_map = {
-        'float32': float_type,
-        'float64': double_type,
-        'double': double_type,
-        'half': half_type,
-        'float16': half_type,
-        'int32': int_type,
-        'int64': long_type
-    }
     return type_map[dtype](cuda)(*shape).random_(a, b)
 
 
 def uniform(shape, cuda, a=0, b=1, dtype='float32'):
     shape = list(shape) if isinstance(shape, tuple) else shape
-    type_map = {
-        'float32': float_type,
-        'float64': double_type,
-        'double': double_type,
-        'half': half_type,
-        'float16': half_type,
-        'int32': int_type,
-        'int64': long_type
-    }
     return type_map[dtype](cuda)(*shape).uniform_(a, b)
 
 
@@ -328,6 +287,20 @@ def eps(half):
     return 1e-4 if half else 1e-6
 
 
+def get_dtype(tensor):
+    ''' returns the type of the tensor as an str'''
+    dtype_map = {
+        torch.float32: 'float32',
+        torch.float16: 'float16',
+        torch.double: 'float64',
+        torch.float64: 'float64',
+        torch.int32: 'int32',
+        torch.int64: 'int64',
+        torch.long: 'int64'
+    }
+    return dtype_map[tensor.dtype]
+
+
 def same_type(half, cuda):
     return half_type(cuda) if half else float_type(cuda)
 
@@ -455,3 +428,14 @@ def register_nan_checks(model):
             exit(-1)
 
     model.apply(lambda module: module.register_backward_hook(check_grad))
+
+
+type_map = {
+    'float32': float_type,
+    'float64': double_type,
+    'double': double_type,
+    'half': half_type,
+    'float16': half_type,
+    'int32': int_type,
+    'int64': long_type
+}
