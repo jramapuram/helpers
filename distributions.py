@@ -10,8 +10,9 @@ from .pixel_cnn.utils import discretized_mix_logistic_loss, \
 
 def nll_activation(logits, nll_type, **kwargs):
     ''' helper to activate logits based on the NLL '''
-    if nll_type == "clamp":
-        fn = sample_from_discretized_mix_logistic_1d if logits.shape[1] == 1 \
+    if nll_type == "disc_mix_logistic":
+        assert 'chans' in kwargs, "need channels for disc_mix_logistic"
+        fn = sample_from_discretized_mix_logistic_1d if kwargs['chans'] == 1 \
             else sample_from_discretized_mix_logistic
         # ideally do this, but needs parameterization
         # return fn(logits, **kwargs)
@@ -27,15 +28,28 @@ def nll_activation(logits, nll_type, **kwargs):
         raise Exception("unknown nll provided")
 
 
+def nll_has_variance(nll_str):
+    ''' a simple helper to return whether we have variance in the likelihood'''
+    nll_map = {
+        'gaussian': True,
+        'laplace': True,
+        'bernoulli': False,
+        'disc_mix_logistic': True
+    }
+
+    assert nll_str in nll_map
+    return nll_map[nll_str]
+
+
 def nll(x, recon_x, nll_type):
     ''' helper to get the actual NLL evaluation '''
     nll_map = {
         "gaussian": nll_gaussian,
         "bernoulli": nll_bernoulli,
         "laplace": nll_laplace,
-        "clamp": nll_clamp
+        "disc_mix_logistic": nll_disc_mix_logistic
     }
-    return nll_map[nll_type](x, recon_x)
+    return nll_map[nll_type](x, recon_x.contiguous())
 
 
 def nll_bernoulli(x, recon_x_logits):
@@ -46,7 +60,7 @@ def nll_bernoulli(x, recon_x_logits):
     return -torch.sum(nll, dim=-1)
 
 
-def nll_clamp(x, recon):
+def nll_disc_mix_logistic(x, recon):
     fn = discretized_mix_logistic_loss_1d if x.shape[1] == 1 \
         else discretized_mix_logistic_loss
     return fn(x, recon)

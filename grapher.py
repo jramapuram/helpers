@@ -183,4 +183,6 @@ class Grapher(object):
             self.function_map[key](value_list)
 
         if clear:  # helper to clear the plot map
-            self._init_map()
+            self.clear()
+
+        self.save()
