@@ -1,3 +1,4 @@
+import gc
 import torch
 import numpy as np
 
@@ -50,6 +51,8 @@ class Grapher(object):
         '''Helper to clear and reset the internal map'''
         if hasattr(self, 'param_map'):
             self.param_map.clear()
+            del self.param_map
+            gc.collect()
 
         self.param_map = self._init_map()
 

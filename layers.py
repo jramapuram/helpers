@@ -1,5 +1,7 @@
 import torch
+import functools
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from collections import OrderedDict
 
@@ -18,6 +20,7 @@ class View(nn.Module):
 class Identity(nn.Module):
     def __init__(self, inplace=True):
         super(Identity, self).__init__()
+        self.__name__ = "identity"
 
     def forward(self, x):
         return x
@@ -95,6 +98,9 @@ class GatedDense(nn.Module):
 
         self.h = nn.Linear(input_size, output_size)
         self.g = nn.Linear(input_size, output_size)
+
+        # for weight-norm applications
+        self.weight = self.h.weight
 
     def forward(self, x):
         if self.activation is None:
@@ -254,6 +260,10 @@ class EarlyStopping(object):
             ''' don't save the model until the burn-in-interval has been exceeded'''
             self.iteration += 1
             return False
+
+        # detach if not already detached
+        if not isinstance(loss, (float, np.float32, np.float64)):
+            loss = loss.clone().detach()
 
         if (loss < self.best_loss):
             self.stopping_step = 0
@@ -536,7 +546,7 @@ def str_to_activ(str_activ):
         'elu': F.elu,
         'sigmoid': F.sigmoid,
         'tanh': F.tanh,
-        'oneplus': oneplus,
+        'oneplus': lambda x: F.softplus(x, beta=1),
         'softmax': F.softmax,
         'log_softmax': F.log_softmax,
         'selu': F.selu,
@@ -812,8 +822,8 @@ def build_conv_encoder(input_shape, output_size, filter_depth=32,
     )
 
 
-def build_dense_encoder(input_shape, output_shape, latent_size=512, nlayers=2,
-                        activation_fn=nn.SELU, normalization_str="none", layer=nn.Linear):
+def _build_dense(input_shape, output_shape, latent_size=512, nlayers=2,
+                 activation_fn=nn.SELU, normalization_str="none", layer=nn.Linear):
     ''' flatten --> layer + norm --> activation -->... --> Linear output --> view'''
     input_flat = int(np.prod(input_shape))
     output_flat = int(np.prod(output_shape))
@@ -837,21 +847,95 @@ def build_dense_encoder(input_shape, output_shape, latent_size=512, nlayers=2,
     return nn.Sequential(OrderedDict(layers))
 
 
-def build_gated_dense_encoder(input_shape, output_shape, latent_size=512, nlayers=2,
+def build_dense_encoder(input_shape, output_size, latent_size=512, nlayers=2,
+                         activation_fn=nn.SELU, normalization_str="none"):
+    ''' flatten --> layer + norm --> activation -->... --> Linear output --> view'''
+    return _build_dense(input_shape, output_size, latent_size, nlayers,
+                        activation_fn, normalization_str, layer=nn.Linear)
+
+def build_gated_dense_encoder(input_shape, output_size, latent_size=512, nlayers=2,
                               activation_fn=nn.SELU, normalization_str="none"):
     ''' flatten --> layer + norm --> activation -->... --> Linear output --> view'''
-    return build_dense_encoder(input_shape, output_shape, latent_size, nlayers,
-                               activation_fn, normalization_str, layer=GatedDense)
+    return _build_dense(input_shape, output_size, latent_size, nlayers,
+                        activation_fn, normalization_str, layer=GatedDense)
 
 
-def build_gated_dense_decoder(input_shape, output_shape, latent_size=512, nlayers=2,
+def build_gated_dense_decoder(input_size, output_shape, latent_size=512, nlayers=2,
                               activation_fn=nn.SELU, normalization_str="none"):
-    ''' flatten --> layer + norm --> activation -->... --> Linear output --> view'''
-    return build_dense_encoder(input_shape, output_shape, latent_size, nlayers,
-                               activation_fn, normalization_str, layer=GatedDense)
+    ''' accecpts a flattened vector (input_size) and outputs output_shape '''
+    return _build_dense(input_size, output_shape, latent_size, nlayers,
+                        activation_fn, normalization_str, layer=GatedDense)
 
 
-def build_dense_decoder(input_shape, output_shape, latent_size=512, nlayers=3,
+def build_dense_decoder(input_size, output_shape, latent_size=512, nlayers=3,
                         activation_fn=nn.SELU, normalization_str="none"):
-    return build_dense_encoder(input_shape, output_shape, latent_size, nlayers,
-                               activation_fn, normalization_str)
+    ''' accepts a flattened vector (input_size) and outputs output_shape '''
+    return _build_dense(input_size, output_shape, latent_size, nlayers,
+                        activation_fn, normalization_str, layer=nn.Linear)
+
+
+def get_encoder(config, name='encoder'):
+    ''' helper to return the correct encoder function from argparse'''
+    net_map = {
+        'relational': build_relational_conv_encoder,
+        'conv': {
+            # True for gated, False for non-gated
+            True: functools.partial(build_gated_conv_encoder,
+                                    filter_depth=config['filter_depth'],
+                                    normalization_str=config['conv_normalization']),
+            False: functools.partial(build_conv_encoder,
+                                     filter_depth=config['filter_depth'],
+                                     normalization_str=config['conv_normalization'])
+        },
+        'dense': {
+            # True for gated, False for non-gated
+            True: functools.partial(build_gated_dense_encoder,
+                                    normalization_str=config['dense_normalization']),
+            False: functools.partial(build_dense_encoder,
+                                     normalization_str=config['dense_normalization'])
+
+        }
+    }
+
+    fn = net_map[config['encoder_layer_type']][not config['disable_gated']]
+    print("using {} {} for {}".format(
+        "gated" if not config['disable_gated'] else "standard",
+        config['encoder_layer_type'],
+        name
+    ))
+    return fn
+
+
+def get_decoder(config, reupsample=True, name='decoder'):
+    ''' helper to return the correct decoder function'''
+    net_map = {
+        'conv': {
+            # True for gated, False for non-gated
+            True: functools.partial(build_gated_conv_decoder,
+                                    filter_depth=config['filter_depth'],
+                                    reupsample=reupsample,
+                                    normalization_str=config['conv_normalization']),
+            False: functools.partial(build_conv_decoder,
+                                     filter_depth=config['filter_depth'],
+                                     reupsample=reupsample,
+                                     normalization_str=config['conv_normalization'])
+        },
+        'dense': {
+            # True for gated, False for non-gated
+            True: functools.partial(build_gated_dense_decoder,
+                                    normalization_str=config['dense_normalization']),
+            False: functools.partial(build_dense_decoder,
+                                     normalization_str=config['dense_normalization'])
+        }
+    }
+
+    # NOTE: pixelcnn is added later
+    layer_type = "conv" if config['decoder_layer_type'] == "pixelcnn" \
+       or config['decoder_layer_type'] == "conv" else "dense"
+    fn = net_map[layer_type][not config['disable_gated']]
+    print("using {} {} for {}".format(
+        "gated" if not config['disable_gated'] else "standard",
+        config['decoder_layer_type'],
+        name
+    ))
+    return fn
