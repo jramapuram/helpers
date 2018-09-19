@@ -15,6 +15,28 @@ def dummy_context():
     yield None
 
 
+def pca_reduce(x, num_reduce):
+    '''reduced matrix X to num_reduce features'''
+    xm = x - torch.mean(x, 1, keepdim=True)
+    xc = torch.matmul(xm, torch.transpose(xm, 0, -1))
+    u, s, v = torch.svd(xc)
+    return torch.matmul(u[:, 0:num_reduce], torch.diag(s[0:num_reduce]))
+
+
+def pca_smaller(mat1, mat2):
+    ''' returns both matrices to have the same #features'''
+    c1shp = mat1.size()
+    c2shp = mat2.size()
+
+    # reduce appropriately
+    if c1shp[1] > c2shp[1]:
+        mat1 = _pca_reduce(mat1, c2shp[1])
+    elif c2shp[1] > c1shp[1]:
+        mat2 = _pca_reduce(mat2, c1shp[1])
+
+    return [mat1, mat2]
+
+
 def recurse_print_keys(m):
     for k, v in m.items():
         if isinstance(v, dict):
@@ -253,6 +275,25 @@ def plot_gaussian_tsne(z_mu_tensor, classes_tensor, prefix_name):
     fig666.savefig(str(prefix_name)+'_embedding.png')
 
 
+def ewma(data, window):
+    ''' from https://tinyurl.com/y7ko7n8z '''
+    if not isinstance(data, np.ndarray):
+        data = np.array(data)
+
+    alpha = 2 /(window + 1.0)
+    alpha_rev = 1-alpha
+    n = data.shape[0]
+
+    pows = alpha_rev**(np.arange(n+1))
+
+    scale_arr = 1/pows[:-1]
+    offset = data[0]*pows[1:]
+    pw0 = alpha*alpha_rev**(n-1)
+
+    mult = data*pw0*scale_arr
+    cumsums = mult.cumsum()
+    out = offset + cumsums*scale_arr[::-1]
+    return out
 
 def zero_pad_smaller_cat(cat1, cat2):
     c1shp = cat1.size()
