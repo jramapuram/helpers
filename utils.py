@@ -30,9 +30,9 @@ def pca_smaller(mat1, mat2):
 
     # reduce appropriately
     if c1shp[1] > c2shp[1]:
-        mat1 = _pca_reduce(mat1, c2shp[1])
+        mat1 = pca_reduce(mat1, c2shp[1])
     elif c2shp[1] > c1shp[1]:
-        mat2 = _pca_reduce(mat2, c1shp[1])
+        mat2 = pca_reduce(mat2, c1shp[1])
 
     return [mat1, mat2]
 
