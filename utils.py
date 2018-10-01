@@ -1,11 +1,13 @@
 import os
 import torch
+import torchvision
 import torch.nn as nn
 import numpy as np
 import scipy as sp
 import contextlib
 import torch.nn.functional as F
 import torch.distributions as D
+import matplotlib.pyplot as plt
 from torch.autograd import Variable
 
 
@@ -175,6 +177,7 @@ def eye(num_elems, cuda, dtype='float32'):
 def ones_like(tensor):
     return torch.ones_like(tensor)
 
+
 def scale(val, src, dst):
     """Helper to scale val from src range to dst range
     """
@@ -251,6 +254,17 @@ def one_hot(num_cols, indices, use_cuda=False):
         mask = Variable(mask, volatile=indices.volatile)
 
     return mask.scatter_(1, indices, ones)
+
+
+def plot_tensor_grid(batch_tensor, save_filename=None):
+    ''' Helper to visualize a batch of images.
+        A non-None filename saves instead of doing a show()'''
+    grid_img = torchvision.utils.make_grid(batch_tensor, nrow=5)
+    plt.imshow(grid_img.permute(1, 2, 0))
+    if save_filename is not None:
+        torchvision.utils.save_image(batch_tensor, save_filename, padding=5)
+    else:
+        plt.show()
 
 
 def plot_gaussian_tsne(z_mu_tensor, classes_tensor, prefix_name):
