@@ -339,7 +339,7 @@ def to_data(tensor_or_var):
 
 
 def eps(half):
-    return 1e-4 if half else 1e-6
+    return 1e-2 if half else 1e-6
 
 
 def get_dtype(tensor):

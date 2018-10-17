@@ -20,10 +20,10 @@ def nll_activation(logits, nll_type, **kwargs):
     elif nll_type == "gaussian":
         num_half_chans = logits.size(1) // 2
         logits_mu = logits[:, 0:num_half_chans, :, :]
-        #return F.sigmoid(logits_mu)
+        #return torch.sigmoid(logits_mu)
         return logits_mu
     elif nll_type == "bernoulli":
-        return F.sigmoid(logits)
+        return torch.sigmoid(logits)
     else:
         raise Exception("unknown nll provided")
 

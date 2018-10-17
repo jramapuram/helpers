@@ -24,7 +24,7 @@ def softmax_accuracy(preds, targets, size_average=True):
 
 def bce_accuracy(pred_logits, targets, size_average=True):
     cuda = is_cuda(pred_logits)
-    pred = torch.round(F.sigmoid(to_data(pred_logits)))
+    pred = torch.round(torch.sigmoid(to_data(pred_logits)))
     pred = pred.type(int_type(cuda))
     reduction_fn = torch.mean if size_average is True else torch.sum
     return reduction_fn(pred.data.eq(to_data(targets)).cpu().type(torch.FloatTensor), -1)

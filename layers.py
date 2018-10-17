@@ -1,4 +1,5 @@
 import torch
+import warnings
 import functools
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,6 +16,14 @@ class View(nn.Module):
 
     def forward(self, input):
         return input.view(*self.shape)
+
+
+class Squeeze(nn.Module):
+    def __init__(self):
+        super(Squeeze, self).__init__()
+
+    def forward(self, input):
+        return input.squeeze()
 
 
 class Identity(nn.Module):
@@ -116,15 +125,15 @@ class GatedDense(nn.Module):
 class GatedConvTranspose2d(nn.Module):
     ''' from jmtomczak's github'''
     def __init__(self, input_channels, output_channels, kernel_size,
-                 stride, padding=0, dilation=1, activation=None):
+                 stride, padding=0, dilation=1, activation=None, bias=True):
         super(GatedConvTranspose2d, self).__init__()
 
         self.activation = activation
         self.sigmoid = nn.Sigmoid()
-        self.h = nn.ConvTranspose2d(input_channels, output_channels, kernel_size,
-                                    stride=stride, padding=padding, dilation=dilation)
-        self.g = nn.ConvTranspose2d(input_channels, output_channels, kernel_size,
-                                    stride=stride, padding=padding, dilation=dilation)
+        self.h = nn.ConvTranspose2d(input_channels, output_channels, kernel_size, stride=stride,
+                                    padding=padding, dilation=dilation, bias=bias)
+        self.g = nn.ConvTranspose2d(input_channels, output_channels, kernel_size, stride=stride,
+                                    padding=padding, dilation=dilation, bias=bias)
 
     def forward(self, x):
         if self.activation is None:
@@ -310,103 +319,6 @@ def init_weights(module):
     return module
 
 
-class Convolutional(nn.Module):
-    def __init__(self, input_size, layer_maps=[32, 64, 128, 64, 32],
-                 # kernel_sizes=[3, 3, 3, 3, 3],
-                 kernel_sizes=[1, 1, 1, 1, 1],
-                 activation_fn=nn.ELU, use_dropout=False, use_bn=False,
-                 use_in=False, use_wn=False, ngpu=1):
-        super(Convolutional, self).__init__()
-        ''' input_size = 2d or 3d'''
-
-        assert len(kernel_sizes) == len(layer_maps)
-
-        # Parameters pass into layer
-        self.input_size = input_size
-        self.is_color = input_size[-1] > 1
-        self.layer_maps = [3 if self.is_color else 1] \
-                          + layer_maps \
-                          + [3 if self.is_color else 1]
-        self.kernel_sizes = [1] + kernel_sizes + [1]
-        self.activation = activation_fn
-        self.use_bn = use_bn
-        self.use_in = use_in
-        self.use_wn = use_wn
-        self.ngpu = ngpu
-        self.use_dropout = use_dropout
-
-        # Are we using a normalization scheme?
-        self.use_norm = bool(use_bn or use_in)
-
-        # Build our model as a sequential layer
-        self.net = self._build_layers()
-        self.add_module('network', self.net)
-        #self = init_weights(self)
-
-    def forward(self, x):
-        if isinstance(x.data, torch.cuda.FloatTensor) and self.ngpu > 1:
-            output = nn.parallel.data_parallel(self.net,
-                                               x,
-                                               range(self.ngpu))
-        else:
-            output = self.net(x)
-
-        return output
-
-    def cuda(self, device_id=None):
-        super(Convolutional, self).cuda(device_id)
-        self.net = self.net.cuda()
-        return self
-
-    def get_info(self):
-        return self.net.modules()
-
-    def get_sizing(self):
-        return str(self.sizes)
-
-    def _add_normalization(self, num_features):
-        if self.use_bn:
-            return nn.BatchNorm2d(num_features)
-        elif self.use_in:
-            return nn.InstanceNorm2d(num_features)
-
-    def _add_dropout(self):
-        if self.use_dropout:
-            return nn.AlphaDropout()
-
-    def _build_layers(self):
-        '''Conv/FC --> BN --> Activ --> Dropout'''
-        'Conv2d maps (N, C_{in}, H, W) --> (N, C_{out}, H_{out}, W_{out})'
-        # if not self.is_color:
-        #     layers = [('flatten', View([-1, 1] + self.input_size))]
-        # else:
-        layers = []
-
-        for i, (in_channels, out_channels) in enumerate(
-                zip(self.layer_maps[0:-1], self.layer_maps[1:-1])):
-
-            l = nn.Conv2d(in_channels, out_channels, self.kernel_sizes[i], padding=0)
-            if self.use_wn:
-                layers.append(('conv_%d' % i,
-                               nn.utils.weight_norm(l)
-                ))
-            else:
-                layers.append(('conv_%d' % i, l))
-
-            if self.use_norm:  # add normalization
-                layers.append(('norm_%d' % i, self._add_normalization(out_channels)))
-
-            layers.append(('activ_%d' % i, self.activation()))
-
-            if self.use_dropout:  # add dropout
-                layers.append(('dropout_%d' % i, self._add_dropout()))
-
-        l_f = nn.Conv2d(self.layer_maps[-2], self.layer_maps[-1],
-                        self.kernel_sizes[-1], padding=0)
-        layers.append(('conv_proj', l_f))
-        return nn.Sequential(OrderedDict(layers))
-
-
 class UpsampleConvLayer(torch.nn.Module):
     '''Upsamples the input and then does a convolution.
     This method gives better results compared to ConvTranspose2d.
@@ -431,87 +343,89 @@ class UpsampleConvLayer(torch.nn.Module):
         out = self.conv2d(out)
         return out
 
-class Dense(nn.Module):
-    def __init__(self, input_size, latent_size, layer_sizes,
-                 activation_fn, use_dropout=False, use_bn=False,
-                 use_in=False, use_wn=False, ngpu=1):
-        super(Dense, self).__init__()
 
-        # Parameters pass into layer
-        self.input_size = input_size
-        self.latent_size = latent_size
-        self.layer_sizes = [input_size] + layer_sizes
-        self.activation = activation_fn
-        self.use_bn = use_bn
-        self.use_in = use_in
-        self.use_wn = use_wn
-        self.ngpu = ngpu
-        self.use_dropout = use_dropout
+class ResnetBlock(nn.Module):
+    def __init__(self, inplanes, planes, stride=1, downsample=None,
+                 normalization_str="groupnorm", activation_str="relu"):
+        super(ResnetBlock, self).__init__()
+        self.gn_planes = int(min(np.ceil(planes / 2), 32))
+        self.conv1 = add_normalization(self.conv3x3(inplanes, planes, stride),
+                                       normalization_str, 2, planes, num_groups=self.gn_planes)
+        self.act = str_to_activ(activation_str)
+        self.conv2 = add_normalization(self.conv3x3(planes, planes),
+                                       normalization_str, 2, planes, num_groups=self.gn_planes)
+        self.stride = stride
+        self.downsample = self.downsampler(inplanes, planes, normalization_str) \
+            if downsample is not None else None
 
-        # Are we using a normalization scheme?
-        self.use_norm = bool(use_bn or use_in)
+    @staticmethod
+    def conv3x3(in_planes, out_planes, stride=1):
+        """3x3 convolution with padding"""
+        return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
+                         padding=1, bias=False)
 
-        # Build our model as a sequential layer
-        self.net = self._build_layers()
-        self.add_module('network', self.net)
-        #self = init_weights(self)
+    def downsampler(self, inplanes, planes, normalization_str):
+        return add_normalization(nn.Conv2d(inplanes, planes, kernel_size=1,
+                                           stride=self.stride, bias=False),
+                                 normalization_str, 2, planes, num_groups=self.gn_planes)
 
     def forward(self, x):
-        if isinstance(x.data, torch.cuda.FloatTensor) and self.ngpu > 1:
-            output = nn.parallel.data_parallel(self.net,
-                                               x,
-                                               range(self.ngpu))
-        else:
-            output = self.net(x)
+        residual = x
 
-        return output
+        out = self.conv1(x)
+        out = self.act(out)
+        out = self.conv2(out)
 
-    def cuda(self, device_id=None):
-        super(Dense, self).cuda(device_id)
-        self.net = self.net.cuda()
-        return self
+        if self.downsample is not None:
+            residual = self.downsample(x)
 
-    def get_info(self):
-        return self.net.modules()
+        out += residual
+        out = self.act(out)
 
-    def get_sizing(self):
-        return str(self.sizes)
+        return out
 
-    def _add_normalization(self, num_features):
-        if self.use_bn:
-            return nn.BatchNorm1d(num_features)
-        elif self.use_in:
-            return nn.InstanceNorm1d(num_features)
 
-    def _add_dropout(self):
-        if self.use_dropout:
-            return nn.AlphaDropout()
+class ResnetDeconvBlock(nn.Module):
+    def __init__(self, inplanes, planes, stride=1, downsample=None,
+                 normalization_str="groupnorm", activation_str="relu"):
+        super(ResnetDeconvBlock, self).__init__()
+        self.gn_planes = int(min(np.ceil(planes / 2), 32))
+        self.conv1 = add_normalization(self.deconv3x3(inplanes, planes, stride),
+                                       normalization_str, 2, planes, num_groups=self.gn_planes)
+        self.act = str_to_activ(activation_str)
+        self.conv2 = add_normalization(self.deconv3x3(planes, planes),
+                                       normalization_str, 2, planes, num_groups=self.gn_planes)
+        self.stride = stride
+        self.downsample = self.downsampler(inplanes, planes, normalization_str) \
+            if downsample is not None else None
 
-    def _build_layers(self):
-        '''Conv/FC --> BN --> Activ --> Dropout'''
-        layers = [('flatten', View([-1, self.input_size]))]
-        for i, (input_size, output_size) in enumerate(
-                zip(self.layer_sizes, self.layer_sizes[1:])):
-            if self.use_wn:
-                layers.append(('linear_%d' % i,
-                               nn.utils.weight_norm(
-                                   nn.Linear(input_size, output_size))
-                ))
-            else:
-                layers.append(('linear_%d' % i, nn.Linear(input_size,
-                                                      output_size)))
+    @staticmethod
+    def deconv3x3(in_planes, out_planes, stride=1):
+        """3x3 convolution with padding"""
+        # nn.ConvTranspose2d(input_size, filter_depth*8, 4, stride=1, bias=True),
+        return nn.ConvTranspose2d(in_planes, out_planes, kernel_size=3, stride=stride,
+                                  padding=0, bias=False)
 
-            if self.use_norm:  # add normalization
-                layers.append(('norm_%d' % i, self._add_normalization(output_size)))
+    def downsampler(self, inplanes, planes, normalization_str):
+        return add_normalization(nn.ConvTranspose2d(inplanes, planes, kernel_size=1,
+                                                    stride=self.stride, bias=False),
+                                 normalization_str, 2, planes, num_groups=self.gn_planes)
 
-            layers.append(('activ_%d' % i, self.activation()))
+    def forward(self, x):
+        residual = x
 
-            if self.use_dropout:  # add dropout
-                layers.append(('dropout_%d' % i, self._add_dropout()))
+        out = self.conv1(x)
+        out = self.act(out)
+        out = self.conv2(out)
 
-        layers.append(('linear_proj', nn.Linear(self.layer_sizes[-1],
-                                                self.latent_size)))
-        return nn.Sequential(OrderedDict(layers))
+        if self.downsample is not None:
+            residual = self.downsample(x)
+
+        print("out = ", out.shape, " | res = ", residual.shape, " | x = ", x.shape)
+        out += residual
+        out = self.act(out)
+
+        return out
 
 
 def str_to_activ_module(str_activ):
@@ -544,8 +458,8 @@ def str_to_activ(str_activ):
     activ_map = {
         'identity': lambda x: x,
         'elu': F.elu,
-        'sigmoid': F.sigmoid,
-        'tanh': F.tanh,
+        'sigmoid': torch.sigmoid,
+        'tanh': torch.tanh,
         'oneplus': lambda x: F.softplus(x, beta=1),
         'softmax': F.softmax,
         'log_softmax': F.log_softmax,
@@ -614,7 +528,8 @@ def build_relational_conv_encoder(input_shape, filter_depth=32,
 def build_pixelcnn_decoder(input_size, output_shape, filter_depth=32,
                            activation_fn=nn.ELU, bilinear_size=(32, 32),
                            normalization_str="none"):
-    ''' modified from jmtomczak's github '''
+    ''' modified from jmtomczak's github, do not use, use submodule pixelcnn '''
+    warnings.warn("use pixelcnn from helpers submodule instead, this is not tested")
     chans = output_shape[0]
     act = nn.SELU(True)  # nn.ReLU(True)
     return nn.Sequential(
@@ -649,7 +564,11 @@ def add_normalization(module, normalization_str, ndims, nfeatures, **kwargs):
             2: lambda nfeatures, **kwargs: nn.GroupNorm(kwargs['num_groups'], nfeatures)
         },
         'instancenorm': {
-            1: lambda nfeatures, **kwargs: nn.InstanceNorm1d(nfeatures),
+            1: lambda nfeatures, **kwargs: nn.Sequential(
+                View([-1, 1, nfeatures]),
+                nn.InstanceNorm1d(nfeatures),
+                View([-1, nfeatures])
+            ),
             2: lambda nfeatures, **kwargs: nn.InstanceNorm2d(nfeatures),
             3: lambda nfeatures, **kwargs: nn.InstanceNorm3d(nfeatures)
         },
@@ -677,105 +596,105 @@ def add_normalization(module, normalization_str, ndims, nfeatures, **kwargs):
 
 def build_gated_conv_encoder(input_shape, output_size, filter_depth=32,
                              activation_fn=Identity, bilinear_size=(32, 32),
-                             normalization_str="none"):
-    print('building gated conv encoder...')
+                             num_layers=4, normalization_str="none"):
+    return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=GatedConv2d,
+                               filter_depth=filter_depth, activation_fn=activation_fn,
+                               bilinear_size=bilinear_size, num_layers=num_layers,
+                               normalization_str=normalization_str)
+
+def build_conv_encoder(input_shape, output_size, filter_depth=32,
+                       activation_fn=nn.SELU, bilinear_size=(32, 32),
+                       num_layers=4, normalization_str="none"):
+    return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=nn.Conv2d,
+                               filter_depth=filter_depth, activation_fn=activation_fn,
+                               bilinear_size=bilinear_size, num_layers=num_layers,
+                               normalization_str=normalization_str)
+
+
+def _build_conv_encoder(input_shape, output_size, layer_type=nn.Conv2d,
+                        filter_depth=32, activation_fn=Identity, bilinear_size=(32, 32),
+                        num_layers=4, normalization_str="none"):
     upsampler = nn.Upsample(size=bilinear_size, mode='bilinear')
     chans = input_shape[0]
+
+    def _make_layer(input_size, filter_depth, kernel_size=4, stride=1):
+        gn_groups = max(int(min(np.ceil(filter_depth / 2), 32)), 1)
+        return nn.Sequential(
+            add_normalization(layer_type(input_size, filter_depth, kernel_size, stride),
+                              normalization_str, 2, filter_depth, num_groups=gn_groups),
+            activation_fn()
+        )
+
+    # build the second to N-1 layers
+    strides = [2 if i % 2 == 0 else 1 for i in range(num_layers)]
+    intermediary_layers = [
+        _make_layer(filter_depth*(2**i), filter_depth*(2**j), stride=s) for i, j, s in zip(range(0, num_layers),
+                                                                                           range(1, num_layers+1),
+                                                                                           strides)
+    ]
+
+    num_init_groups = max(int(min(np.ceil(filter_depth / 2), 32)), 1)
+    num_final_groups = max(int(min(np.ceil(filter_depth*(2**num_layers) / 2), 32)), 1)
     return nn.Sequential(
         upsampler if input_shape[1:] != bilinear_size else Identity(),
         # input dim: num_channels x 32 x 32
-        add_normalization(GatedConv2d(chans, filter_depth, 5, stride=1),
-                          normalization_str, 2, filter_depth, num_groups=32),
+        add_normalization(layer_type(chans, filter_depth, 5, stride=1),
+                          normalization_str, 2, filter_depth, num_groups=num_init_groups),
         activation_fn(),
-        # state dim: 32 x 28 x 28
-        add_normalization(GatedConv2d(filter_depth, filter_depth*2, 4, stride=2),
-                          normalization_str, 2, filter_depth*2, num_groups=32),
-        activation_fn(),
-        # state dim: 64 x 13 x 13
-        add_normalization(GatedConv2d(filter_depth*2, filter_depth*4, 4, stride=1),
-                          normalization_str, 2, filter_depth*4, num_groups=32),
-        activation_fn(),
-        # state dim: 128 x 10 x 10
-        add_normalization(GatedConv2d(filter_depth*4, filter_depth*8, 4, stride=2),
-                          normalization_str, 2, filter_depth*8, num_groups=32),
-        activation_fn(),
-        # state dim: 256 x 4 x 4
-        add_normalization(GatedConv2d(filter_depth*8, filter_depth*16, 4, stride=1),
-                          normalization_str, 2, filter_depth*16, num_groups=32),
+
+        # add dynamic intermediary layers
+        *intermediary_layers,
+
+        # state dim: 512 x 1 x 1
+        add_normalization(layer_type(filter_depth*(2**num_layers), filter_depth*(2**num_layers), 1, stride=1),
+                          normalization_str, 2, filter_depth*(2**num_layers), num_groups=num_final_groups),
         activation_fn(),
         # state dim: 512 x 1 x 1
-        add_normalization(GatedConv2d(filter_depth*16, filter_depth*16, 1, stride=1),
-                          normalization_str, 2, filter_depth*16, num_groups=32),
-        activation_fn(),
-        # state dim: 512 x 1 x 1
-        GatedConv2d(filter_depth*16, output_size, 1, stride=1),
+        layer_type(filter_depth*(2**num_layers), output_size, 1, stride=1),
         # output dim: opt.z_dim x 1 x 1
-        View([-1, output_size])
+        Squeeze()
     )
 
-
-def build_gated_conv_decoder(input_size, output_shape, filter_depth=32,
-                             activation_fn=Identity, bilinear_size=(32, 32),
-                             normalization_str="none", reupsample=True):
-    print('building gated conv decoder...')
+def _build_conv_decoder(input_size, output_shape, layer_type=nn.ConvTranspose2d,
+                        filter_depth=32, activation_fn=nn.SELU, bilinear_size=(32, 32),
+                        num_layers=3, normalization_str='none', reupsample=True):
+    '''Conv/FC --> BN --> Activ --> Dropout'''
     chans = output_shape[0]
     upsampler = nn.Upsample(size=output_shape[1:], mode='bilinear')
+
+    def _make_layer(input_size, filter_depth, kernel_size=4, stride=1):
+        gn_groups = max(int(min(np.ceil(filter_depth / 2), 32)), 1)
+        return nn.Sequential(
+            add_normalization(layer_type(input_size, filter_depth, kernel_size, stride),
+                              normalization_str, 2, filter_depth, num_groups=gn_groups),
+            activation_fn()
+        )
+
+    # build the second to N-1 layers
+    strides = [2 if i % 2 == 0 else 1 for i in range(num_layers)]
+    intermediary_layers = [
+        _make_layer(filter_depth*(2**i), filter_depth*(2**j), stride=s) for i, j, s in zip(range(num_layers, -1, -1),
+                                                                                           range(num_layers-1, -1, -1),
+                                                                                           strides)
+    ]
+
+    num_init_groups = max(int(min(np.ceil(filter_depth*(2**num_layers) / 2), 32)), 1)
+    num_final_groups = max(int(min(np.ceil(filter_depth / 2), 32)), 1)
     return nn.Sequential(
         View([-1, input_size, 1, 1]),
         # input dim: z_dim x 1 x 1
-        add_normalization(GatedConvTranspose2d(input_size, filter_depth*8, 4, stride=1),
-                          normalization_str, 2, filter_depth*8, num_groups=32),
+        add_normalization(layer_type(input_size, filter_depth*(2**num_layers), 4, stride=1, bias=True),
+                          normalization_str, 2, filter_depth*(2**num_layers), num_groups=num_init_groups),
         activation_fn(),
-        # state dim:   256 x 4 x 4
-        add_normalization(GatedConvTranspose2d(filter_depth*8, filter_depth*4, 4, stride=2),
-                          normalization_str, 2, filter_depth*4, num_groups=32),
-        activation_fn(),
-        # state dim: 128 x 10 x 10
-        add_normalization(GatedConvTranspose2d(filter_depth*4, filter_depth*2, 4, stride=1),
-                          normalization_str, 2, filter_depth*2, num_groups=32),
-        activation_fn(),
-        # state dim: 64 x 13 x 13
-        add_normalization(GatedConvTranspose2d(filter_depth*2, filter_depth, 4, stride=2),
-                          normalization_str, 2, filter_depth, num_groups=32),
-        activation_fn(),
-        # state dim: 32 x 28 x 28
-        add_normalization(GatedConvTranspose2d(filter_depth, filter_depth, 5, stride=1),
-                          normalization_str, 2, filter_depth, num_groups=32),
-        activation_fn(),
-        # state dim: 32 x 32 x 32
-        nn.Conv2d(filter_depth, chans, 1, stride=1),
-        # output dim: num_channels x 32 x 32
-        upsampler if output_shape[1:] != bilinear_size and reupsample else Identity()
-    )
 
+        # add intermediary layers
+        *intermediary_layers,
 
-def build_conv_decoder(input_size, output_shape, filter_depth=32,
-                       activation_fn=nn.SELU, bilinear_size=(32, 32),
-                       normalization_str='none', reupsample=True):
-    chans = output_shape[0]
-    upsampler = nn.Upsample(size=output_shape[1:], mode='bilinear')
-    return nn.Sequential(
-        View([-1, input_size, 1, 1]),
-        # input dim: z_dim x 1 x 1
-        add_normalization(nn.ConvTranspose2d(input_size, filter_depth*8, 4, stride=1, bias=True),
-                          normalization_str, 2, filter_depth*8, num_groups=32),
-        activation_fn(),
-        # state dim:   256 x 4 x 4
-        add_normalization(nn.ConvTranspose2d(filter_depth*8, filter_depth*4, 4, stride=2, bias=True),
-                          normalization_str, 2, filter_depth*4, num_groups=32),
-        activation_fn(),
-        # state dim: 128 x 10 x 10
-        add_normalization(nn.ConvTranspose2d(filter_depth*4, filter_depth*2, 4, stride=1, bias=True),
-                          normalization_str, 2, filter_depth*2, num_groups=32),
-        activation_fn(),
-        # state dim: 64 x 13 x 13
-        add_normalization(nn.ConvTranspose2d(filter_depth*2, filter_depth, 4, stride=2, bias=True),
-                          normalization_str, 2, filter_depth, num_groups=32),
-        activation_fn(),
         # state dim: 32 x 28 x 28
-        add_normalization(nn.ConvTranspose2d(filter_depth, filter_depth, 5, stride=1, bias=True),
-                          normalization_str, 2, filter_depth, num_groups=32),
+        add_normalization(layer_type(filter_depth, filter_depth, 5, stride=1),
+                          normalization_str, 2, filter_depth, num_groups=num_final_groups),
         activation_fn(),
+
         # state dim: 32 x 32 x 32
         nn.Conv2d(filter_depth, chans, 1, stride=1, bias=True),
         # output dim: num_channels x 32 x 32
@@ -783,43 +702,26 @@ def build_conv_decoder(input_size, output_shape, filter_depth=32,
     )
 
 
+def build_gated_conv_decoder(input_size, output_shape, filter_depth=32,
+                             activation_fn=Identity, bilinear_size=(32, 32),
+                             num_layers=3, normalization_str="none", reupsample=True):
+    ''' helper that calls the builder function with GatedConvTranspose2d'''
+    return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
+                               filter_depth=filter_depth, activation_fn=activation_fn,
+                               bilinear_size=bilinear_size, num_layers=num_layers,
+                               normalization_str=normalization_str,
+                               reupsample=reupsample, layer_type=GatedConvTranspose2d)
 
-def build_conv_encoder(input_shape, output_size, filter_depth=32,
+
+def build_conv_decoder(input_size, output_shape, filter_depth=32,
                        activation_fn=nn.SELU, bilinear_size=(32, 32),
-                       normalization_str="none"):
-    upsampler = nn.Upsample(size=bilinear_size, mode='bilinear')
-    chans = input_shape[0]
-    return nn.Sequential(
-        upsampler if input_shape[1:] != bilinear_size else Identity(),
-        # input dim: num_channels x 32 x 32
-        add_normalization(nn.Conv2d(chans, filter_depth, 5, stride=1, bias=True),
-                          normalization_str, 2, filter_depth, num_groups=32),
-        activation_fn(),
-        # state dim: 32 x 28 x 28
-        add_normalization(nn.Conv2d(filter_depth, filter_depth*2, 4, stride=2, bias=True),
-                          normalization_str, 2, filter_depth*2, num_groups=32),
-        activation_fn(),
-        # state dim: 64 x 13 x 13
-        add_normalization(nn.Conv2d(filter_depth*2, filter_depth*4, 4, stride=1, bias=True),
-                          normalization_str, 2, filter_depth*4, num_groups=32),
-        activation_fn(),
-        # state dim: 128 x 10 x 10
-        add_normalization(nn.Conv2d(filter_depth*4, filter_depth*8, 4, stride=2, bias=True),
-                          normalization_str, 2, filter_depth*8, num_groups=32),
-        activation_fn(),
-        # state dim: 256 x 4 x 4
-        add_normalization(nn.Conv2d(filter_depth*8, filter_depth*16, 4, stride=1, bias=True),
-                          normalization_str, 2, filter_depth*16, num_groups=32),
-        activation_fn(),
-        # state dim: 512 x 1 x 1
-        add_normalization(nn.Conv2d(filter_depth*16, filter_depth*16, 1, stride=1, bias=True),
-                          normalization_str, 2, filter_depth*16, num_groups=32),
-        activation_fn(),
-        # state dim: 512 x 1 x 1
-        nn.Conv2d(filter_depth*16, output_size, 1, stride=1, bias=True),
-        # output dim: opt.z_dim x 1 x 1
-        View([-1, output_size])
-    )
+                       num_layers=3, normalization_str='none', reupsample=True):
+    ''' helper that calls the builder function with nn.ConvTranspose2d'''
+    return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
+                               filter_depth=filter_depth, activation_fn=activation_fn,
+                               bilinear_size=bilinear_size, num_layers=num_layers,
+                               normalization_str=normalization_str,
+                               reupsample=reupsample, layer_type=nn.ConvTranspose2d)
 
 
 def _build_dense(input_shape, output_shape, latent_size=512, nlayers=2,
