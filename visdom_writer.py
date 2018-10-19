@@ -18,9 +18,8 @@ class VisdomWriter:
 
         self.scalar_dict = {}
         self.server_connected = False
-        self.vis = Visdom(server=server,
-                          port=port,
-                          env=env)
+        self.vis = Visdom(server=server, port=port, env=env,
+                          use_incoming_socket=False)
         self.windows = {}
 
     def add_scalar(self, tag, scalar_value, global_step=None):
