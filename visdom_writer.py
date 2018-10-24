@@ -10,16 +10,17 @@ from tensorboardX.x2num import make_np
 
 
 class VisdomWriter:
-    def __init__(self, env, server, port=8097):
+    def __init__(self, env, server, port=8097, use_incoming_socket=False):
         try:
             from visdom import Visdom
         except ImportError:
             raise ImportError("Visdom visualization requires installation of Visdom")
 
+        self.env = env
         self.scalar_dict = {}
         self.server_connected = False
         self.vis = Visdom(server=server, port=port, env=env,
-                          use_incoming_socket=False)
+                          use_incoming_socket=use_incoming_socket)
         self.windows = {}
 
     def add_scalar(self, tag, scalar_value, global_step=None):
@@ -65,6 +66,7 @@ class VisdomWriter:
                 },
             )
 
+        self.save()
 
     def add_scalars(self, main_tag, tag_scalar_dict, global_step=None):
         """Adds many scalar data to summary.
@@ -91,6 +93,7 @@ class VisdomWriter:
         for key in tag_scalar_dict.keys():
             self.add_scalar(key, tag_scalar_dict[key], global_step, main_tag)
 
+        self.save()
 
     def export_scalars_to_json(self, path):
         """Exports to the given 'path' an ASCII file containing all the scalars written
@@ -102,7 +105,7 @@ class VisdomWriter:
         with open(path, "w") as f:
             json.dump(self.scalar_dict, f)
         self.scalar_dict = {}
-
+        self.save()
 
     def add_histogram(self, tag, values, global_step=None, bins='tensorflow'):
         """Add histogram to summary.
@@ -116,7 +119,7 @@ class VisdomWriter:
         """
         values = make_np(values)
         self.vis.histogram(make_np(values), opts={'title': tag})
-
+        self.save()
 
     def add_image(self, tag, img_tensor, global_step=None, caption=None):
         """Add image data to summary.
@@ -135,6 +138,7 @@ class VisdomWriter:
         img_tensor = make_np(img_tensor)
         fn(img_tensor, win=tag,
            opts={'title': tag, 'caption': caption })
+        self.save()
 
     def add_figure(self, tag, figure, global_step=None, close=True):
         """Render matplotlib figure into an image and add it to summary.
@@ -148,7 +152,7 @@ class VisdomWriter:
             close (bool): Flag to automatically close the figure
         """
         self.add_image(tag, figure_to_image(figure, close), global_step)
-
+        self.save()
 
     def add_video(self, tag, vid_tensor, global_step=None, fps=4):
         """Add video data to summary.
@@ -187,6 +191,7 @@ class VisdomWriter:
         else:
             self.vis.video(tensor=vid_tensor, opts={'fps': fps})
 
+        self.save()
 
     def add_audio(self, tag, snd_tensor, global_step=None, sample_rate=44100):
         """Add audio data to summary.
@@ -202,7 +207,7 @@ class VisdomWriter:
         """
         snd_tensor = make_np(snd_tensor)
         self.vis.audio(tensor=snd_tensor, opts={'sample_frequency': sample_rate})
-
+        self.save()
 
     def add_text(self, tag, text_string, global_step=None):
         """Add text data to summary.
@@ -219,22 +224,20 @@ class VisdomWriter:
             # Visdom doesn't support tags, write the tag as the text_string
             text_string = tag
         self.vis.text(text_string)
-
+        # self.save(), MEH: don't save env just because of text
 
     def add_graph_onnx(self, prototxt):
         # TODO: Visdom doesn't support graph visualization yet, so this is a no-op
         return
 
-
     def add_graph(self, model, input_to_model=None, verbose=False, **kwargs):
         # TODO: Visdom doesn't support graph visualization yet, so this is a no-op
         return
 
-
-    def add_embedding(self, mat, metadata=None, label_img=None, global_step=None, tag='default', metadata_header=None):
+    def add_embedding(self, mat, metadata=None, label_img=None,
+                      global_step=None, tag='default', metadata_header=None):
         # TODO: Visdom doesn't support embeddings yet, so this is a no-op
         return
-
 
     def add_pr_curve(self, tag, labels, predictions, global_step=None, num_thresholds=127, weights=None):
         """Adds precision recall curve.
@@ -265,7 +268,7 @@ class VisdomWriter:
                 'ylabel': 'precision',
             },
         )
-
+        self.save()
 
     def add_pr_curve_raw(self, tag, true_positive_counts,
                          false_positive_counts,
@@ -298,6 +301,10 @@ class VisdomWriter:
                 'ylabel': 'precision',
             },
         )
+        self.save()
+
+    def save(self):
+        self.vis.save([self.env])
 
     def close(self):
         del self.vis

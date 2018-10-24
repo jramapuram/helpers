@@ -1,3 +1,5 @@
+# coding: utf-8
+
 import os
 import torch
 import torchvision
@@ -114,6 +116,14 @@ def normalize_train_test_images(train_imgs, test_imgs, eps=1e-9):
     train_imgs , [mu, sigma] = normalize_images(train_imgs, eps=eps)
     return [train_imgs,
             (test_imgs - mu) / (sigma + eps)]
+
+
+def add_noise_to_imgs(imgs, disc_level=256.):
+    # x(i) + u with u ∼ U(0, a), where a is determined by the
+    # discretization level of the data
+    return imgs + uniform(imgs.shape, cuda=imgs.is_cuda,
+                          a=0, b=np.log(disc_level)/disc_level,
+                          dtype=get_dtype(imgs))
 
 
 def num_samples_in_loader(data_loader):
