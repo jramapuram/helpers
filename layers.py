@@ -328,7 +328,9 @@ class UpsampleConvLayer(torch.nn.Module):
         super(UpsampleConvLayer, self).__init__()
         self.upsample = upsample
         if upsample:
-            self.upsample_layer = torch.nn.Upsample(scale_factor=upsample, mode='bilinear')
+            self.upsample_layer = torch.nn.Upsample(scale_factor=upsample,
+                                                    mode='bilinear',
+                                                    align_corners=True)
 
         reflection_padding = kernel_size // 2
         self.reflection_pad = torch.nn.ReflectionPad2d(reflection_padding)
@@ -502,7 +504,7 @@ def build_image_downsampler(img_shp, new_shp,
 
 def build_relational_conv_encoder(input_shape, filter_depth=32,
                                   activation_fn=nn.ELU, bilinear_size=(32, 32)):
-    upsampler = nn.Upsample(size=bilinear_size, mode='bilinear')
+    upsampler = nn.Upsample(size=bilinear_size, mode='bilinear', align_corners=True)
     chans = input_shape[0]
     return nn.Sequential(
         upsampler if input_shape[1:] != bilinear_size else Identity(),
@@ -614,7 +616,7 @@ def build_conv_encoder(input_shape, output_size, filter_depth=32,
 def _build_conv_encoder(input_shape, output_size, layer_type=nn.Conv2d,
                         filter_depth=32, activation_fn=Identity, bilinear_size=(32, 32),
                         num_layers=4, normalization_str="none"):
-    upsampler = nn.Upsample(size=bilinear_size, mode='bilinear')
+    upsampler = nn.Upsample(size=bilinear_size, mode='bilinear', align_corners=True)
     chans = input_shape[0]
 
     def _make_layer(input_size, filter_depth, kernel_size=4, stride=1):
@@ -660,7 +662,7 @@ def _build_conv_decoder(input_size, output_shape, layer_type=nn.ConvTranspose2d,
                         num_layers=3, normalization_str='none', reupsample=True):
     '''Conv/FC --> BN --> Activ --> Dropout'''
     chans = output_shape[0]
-    upsampler = nn.Upsample(size=output_shape[1:], mode='bilinear')
+    upsampler = nn.Upsample(size=output_shape[1:], mode='bilinear', align_corners=True)
 
     def _make_layer(input_size, filter_depth, kernel_size=4, stride=1):
         gn_groups = max(int(min(np.ceil(filter_depth / 2), 32)), 1)

@@ -61,6 +61,7 @@ def nll_bernoulli(x, recon_x_logits):
 
 
 def nll_disc_mix_logistic(x, recon):
+    assert len(x.shape) == len(recon.shape) == 4, "expecting 4d input for logistic loss"
     fn = discretized_mix_logistic_loss_1d if x.shape[1] == 1 \
         else discretized_mix_logistic_loss
     return fn(x, recon)

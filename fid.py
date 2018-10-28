@@ -273,7 +273,7 @@ class FID(nn.Module):
             print("compiling inception_v3 FID model")
             model = nn.Sequential(
                 BWtoRGB(),
-                nn.Upsample(size=[299, 299], mode='bilinear'),
+                nn.Upsample(size=[299, 299], mode='bilinear', align_corners=True),
                 InceptionV3UptoPool3()#self.output_size)
             )
         else:

@@ -52,16 +52,21 @@ After this you can use `calculate_fid` from metrics.
 
 ## Grapher
 
+The grapher can plot to visdom or tensorboardX
 Currently there exists only a grapher, the visdom grapher.
 This helper utilizes a matplotlib style API for sending data to visdom.
 
 ```python
 from helpers.grapher import Grapher
 
-grapher = Grapher("unique_experiment_uuid", "http://localhost", port=8097)
-grapher.register_single(  # format is [xarr, yarr]
-    {'loss': [[epoch], [loss.data[0]]]},
-    plot_type='line'
-)
-grapher.show()
+# for visdom:
+grapher = Grapher('visdom', env='my_experiment',
+                  server='http://localhost',
+                  port=8097)
+
+# for tensorboardX
+grapher = Grapher('tensorboard', 'my_experiment')
+
+# to add a scalar
+grapher.add_scalar('my_scalar', value, epoch)
 ```
