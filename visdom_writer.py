@@ -307,6 +307,10 @@ class VisdomWriter:
         self.vis.save([self.env])
 
     def close(self):
-        del self.vis
-        del self.scalar_dict
+        if hasattr(self, 'vis'):
+            del self.vis
+
+        if hasattr(self, 'scalar_dict'):
+            del self.scalar_dict
+
         gc.collect()
