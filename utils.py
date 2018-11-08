@@ -9,7 +9,6 @@ import scipy as sp
 import contextlib
 import torch.nn.functional as F
 import torch.distributions as D
-import matplotlib.pyplot as plt
 from torch.autograd import Variable
 
 
@@ -269,6 +268,7 @@ def one_hot(num_cols, indices, use_cuda=False):
 def plot_tensor_grid(batch_tensor, save_filename=None):
     ''' Helper to visualize a batch of images.
         A non-None filename saves instead of doing a show()'''
+    import matplotlib.pyplot as plt
     grid_img = torchvision.utils.make_grid(batch_tensor, nrow=5)
     plt.imshow(grid_img.permute(1, 2, 0))
     if save_filename is not None:

@@ -6,7 +6,7 @@ import torch.distributions as D
 from scipy import linalg
 from torch.autograd import Variable
 
-from .utils import to_data, float_type, \
+from .utils import to_data, float_type, int_type, \
     num_samples_in_loader, zero_pad_smaller_cat, zeros_like
 
 
@@ -23,11 +23,12 @@ def softmax_accuracy(preds, targets, size_average=True):
 
 
 def bce_accuracy(pred_logits, targets, size_average=True):
-    cuda = is_cuda(pred_logits)
+    cuda = pred_logits.is_cuda
     pred = torch.round(torch.sigmoid(to_data(pred_logits)))
     pred = pred.type(int_type(cuda))
+    targets = targets.type(int_type(cuda))
     reduction_fn = torch.mean if size_average is True else torch.sum
-    return reduction_fn(pred.data.eq(to_data(targets)).cpu().type(torch.FloatTensor), -1)
+    return reduction_fn(pred.eq(targets).cpu().type(torch.FloatTensor))
 
 
 def frechet_gauss_gauss_np(synthetic_features, test_features, eps=1e-6):
