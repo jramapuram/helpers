@@ -56,6 +56,32 @@ class BWtoRGB(nn.Module):
             return x
 
 
+class Rotate(nn.Module):
+    def __init__(self, angle, resize_shape=None, resize_mode='bilinear', align_corners=True):
+        ''' Accepts a batch of tensors, rotates by angle and returns a resized image,
+            NOTE: resize_shape is [C, H, W] '''
+        super(Rotate, self).__init__()
+        self.resize_shape = resize_shape
+        self.resize_mode = resize_mode
+        self.align_corners = align_corners
+        self.angle = angle
+        rads = np.pi / 180. * angle
+        self.rotation_matrix = torch.zeros(1, 2, 3)
+        self.rotation_matrix[:, :, :2] = torch.tensor([[np.cos(rads), -np.sin(rads)],
+                                                       [np.sin(rads), np.cos(rads)]],
+                                                      dtype=torch.float32)
+
+    def forward(self, x):
+        if x.is_cuda and not self.rotation_matrix.is_cuda:
+            self.rotation_matrix = self.rotation_matrix.cuda()
+
+        grid = F.affine_grid(self.rotation_matrix.expand(x.size(0), -1, -1), x.size())
+        resize_shape = self.resize_shape[-2:] if self.resize_shape is not None else x.shape[-2:]
+        return F.interpolate(F.grid_sample(x, grid), size=resize_shape,
+                             mode=self.resize_mode,
+                             align_corners=self.align_corners)
+
+
 class MaskedConv2d(nn.Conv2d):
     ''' from jmtomczak's github '''
     def __init__(self, mask_type, *args, **kwargs):
@@ -837,8 +863,10 @@ def get_encoder(config, name='encoder'):
         'dense': {
             # True for gated, False for non-gated
             True: functools.partial(build_gated_dense_encoder,
+                                    latent_size=config['latent_size'],
                                     normalization_str=config['dense_normalization']),
             False: functools.partial(build_dense_encoder,
+                                     latent_size=config['latent_size'],
                                      normalization_str=config['dense_normalization'])
 
         }
@@ -870,8 +898,10 @@ def get_decoder(config, reupsample=True, name='decoder'):
         'dense': {
             # True for gated, False for non-gated
             True: functools.partial(build_gated_dense_decoder,
+                                    latent_size=config['latent_size'],
                                     normalization_str=config['dense_normalization']),
             False: functools.partial(build_dense_decoder,
+                                     latent_size=config['latent_size'],
                                      normalization_str=config['dense_normalization'])
         }
     }
