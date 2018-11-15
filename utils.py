@@ -484,6 +484,12 @@ def nan_check_and_break(tensor, name=""):
         exit(-1)
 
 
+def zero_check_and_break(tensor, name=""):
+    if torch.sum(tensor == 0).item() > 0:
+        print("tensor {} of {} dim contained ZERO!!".format(name, tensor.shape))
+        exit(-1)
+
+
 def register_nan_checks(model):
     def check_grad(module, grad_input, grad_output):
         # print(module) you can add this to see that the hook is called
