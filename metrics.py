@@ -11,7 +11,7 @@ from .utils import to_data, float_type, int_type, \
 
 
 def softmax_correct(preds, targets):
-    pred = to_data(preds).max(1)[1] # get the index of the max log-probability
+    pred = to_data(preds).max(1)[1]  # get the index of the max log-probability
     assert len(targets.shape) == 1, "expecting 1d target indices"
     targ = to_data(targets)
     return pred.eq(targ).cpu().type(torch.FloatTensor)
