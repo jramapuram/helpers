@@ -480,18 +480,14 @@ def nan_check_and_break(tensor, name=""):
         for tensor in input:
             return(nan_check_and_break(tensor, name))
     else:
-        if torch.sum(torch.isnan(tensor)) > 0:
-            print("Tensor {} with shape {} was NaN.".format(name, tensor.shape))
-            exit(-1)
-        elif torch.sum(torch.isinf(tensor)) > 0:
-            print("Tensor {} with shape {} was Inf.".format(name, tensor.shape))
+        if nan_check(tensor, name) is True:
             exit(-1)
 
 
 def nan_check(tensor, name=""):
     if isinstance(input, list) or isinstance(input, tuple):
         for tensor in input:
-            return(nan_check_and_break(tensor, name))
+            return(nan_check(tensor, name))
     else:
         if torch.sum(torch.isnan(tensor)) > 0:
             print("Tensor {} with shape {} was NaN.".format(name, tensor.shape))
