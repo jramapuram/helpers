@@ -52,8 +52,8 @@ class BWtoRGB(nn.Module):
         chans = x.size(1)
         if chans < 3:
             return torch.cat([x, x, x], 1)
-        else:
-            return x
+
+        return x
 
 
 class Rotate(nn.Module):
@@ -82,6 +82,171 @@ class Rotate(nn.Module):
                              align_corners=self.align_corners)
 
 
+class AddCoordinates(object):
+
+    r"""Coordinate Adder Module as defined in 'An Intriguing Failing of
+    Convolutional Neural Networks and the CoordConv Solution'
+    (https://arxiv.org/pdf/1807.03247.pdf).
+
+    This module concatenates coordinate information (`x`, `y`, and `r`) with
+    given input tensor.
+
+    `x` and `y` coordinates are scaled to `[-1, 1]` range where origin is the
+    center. `r` is the Euclidean distance from the center and is scaled to
+    `[0, 1]`.
+
+    Args:
+        with_r (bool, optional): If `True`, adds radius (`r`) coordinate
+            information to input image. Default: `False`
+
+    Shape:
+        - Input: `(N, C_{in}, H_{in}, W_{in})`
+        - Output: `(N, (C_{in} + 2) or (C_{in} + 3), H_{in}, W_{in})`
+
+    Examples:
+        >>> coord_adder = AddCoordinates(True)
+        >>> input = torch.randn(8, 3, 64, 64)
+        >>> output = coord_adder(input)
+
+        >>> coord_adder = AddCoordinates(True)
+        >>> input = torch.randn(8, 3, 64, 64).cuda()
+        >>> output = coord_adder(input)
+
+        >>> device = torch.device("cuda:0")
+        >>> coord_adder = AddCoordinates(True)
+        >>> input = torch.randn(8, 3, 64, 64).to(device)
+        >>> output = coord_adder(input)
+    """
+
+    def __init__(self, with_r=False):
+        self.with_r = with_r
+
+    def __call__(self, image):
+        batch_size, _, image_height, image_width = image.size()
+        if image_height == image_width == 1: # handle [B, C, 1, 1] case
+            y_coords = torch.tensor([[1]])
+            x_coords = torch.tensor([[1]])
+        else:
+            y_coords = 2.0 * torch.arange(image_height).unsqueeze(
+                1).expand(image_height, image_width) / (image_height - 1.0) - 1.0
+            x_coords = 2.0 * torch.arange(image_width).unsqueeze(
+                0).expand(image_height, image_width) / (image_width - 1.0) - 1.0
+
+        coords = torch.stack((y_coords, x_coords), dim=0)
+
+        if self.with_r:
+            rs = ((y_coords ** 2) + (x_coords ** 2)) ** 0.5
+            rs = rs / torch.max(rs)
+            rs = torch.unsqueeze(rs, dim=0)
+            coords = torch.cat((coords, rs), dim=0)
+
+        coords = torch.unsqueeze(coords, dim=0).repeat(batch_size, 1, 1, 1)
+        coords = coords.type(image.dtype)
+        return torch.cat((coords.to(image.device), image), dim=1)
+
+
+class CoordConv(nn.Module):
+
+    r"""2D Convolution Module Using Extra Coordinate Information as defined
+    in 'An Intriguing Failing of Convolutional Neural Networks and the
+    CoordConv Solution' (https://arxiv.org/pdf/1807.03247.pdf).
+
+    Args:
+        Same as `torch.nn.Conv2d` with two additional arguments
+        with_r (bool, optional): If `True`, adds radius (`r`) coordinate
+            information to input image. Default: `False`
+
+    Shape:
+        - Input: `(N, C_{in}, H_{in}, W_{in})`
+        - Output: `(N, C_{out}, H_{out}, W_{out})`
+
+    Examples:
+        >>> coord_conv = CoordConv(3, 16, 3, with_r=True)
+        >>> input = torch.randn(8, 3, 64, 64)
+        >>> output = coord_conv(input)
+
+        >>> coord_conv = CoordConv(3, 16, 3, with_r=True).cuda()
+        >>> input = torch.randn(8, 3, 64, 64).cuda()
+        >>> output = coord_conv(input)
+
+        >>> device = torch.device("cuda:0")
+        >>> coord_conv = CoordConv(3, 16, 3, with_r=True).to(device)
+        >>> input = torch.randn(8, 3, 64, 64).to(device)
+        >>> output = coord_conv(input)
+    """
+
+    def __init__(self, in_channels, out_channels, kernel_size,
+                 stride=1, padding=0, dilation=1, groups=1, bias=True,
+                 with_r=True):
+        super(CoordConv, self).__init__()
+
+        in_channels += 2
+        if with_r:
+            in_channels += 1
+
+        self.conv_layer = nn.Conv2d(in_channels, out_channels,
+                                    kernel_size, stride=stride,
+                                    padding=padding, dilation=dilation,
+                                    groups=groups, bias=bias)
+        self.coord_adder = AddCoordinates(with_r)
+
+    def forward(self, x):
+        x = self.coord_adder(x)
+        return self.conv_layer(x)
+
+
+class CoordConvTranspose(nn.Module):
+
+    r"""2D Transposed Convolution Module Using Extra Coordinate Information
+    as defined in 'An Intriguing Failing of Convolutional Neural Networks and
+    the CoordConv Solution' (https://arxiv.org/pdf/1807.03247.pdf).
+
+    Args:
+        Same as `torch.nn.ConvTranspose2d` with two additional arguments
+        with_r (bool, optional): If `True`, adds radius (`r`) coordinate
+            information to input image. Default: `False`
+
+    Shape:
+        - Input: `(N, C_{in}, H_{in}, W_{in})`
+        - Output: `(N, C_{out}, H_{out}, W_{out})`
+
+    Examples:
+        >>> coord_conv_tr = CoordConvTranspose(3, 16, 3, with_r=True)
+        >>> input = torch.randn(8, 3, 64, 64)
+        >>> output = coord_conv_tr(input)
+
+        >>> coord_conv_tr = CoordConvTranspose(3, 16, 3, with_r=True).cuda()
+        >>> input = torch.randn(8, 3, 64, 64).cuda()
+        >>> output = coord_conv_tr(input)
+
+        >>> device = torch.device("cuda:0")
+        >>> coord_conv_tr = CoordConvTranspose(3, 16, 3, with_r=True).to(device)
+        >>> input = torch.randn(8, 3, 64, 64).to(device)
+        >>> output = coord_conv_tr(input)
+    """
+
+    def __init__(self, in_channels, out_channels, kernel_size,
+                 stride=1, padding=0, output_padding=0, groups=1, bias=True,
+                 dilation=1, with_r=True):
+        super(CoordConvTranspose, self).__init__()
+
+        in_channels += 2
+        if with_r:
+            in_channels += 1
+
+        self.conv_tr_layer = nn.ConvTranspose2d(in_channels, out_channels,
+                                                kernel_size, stride=stride,
+                                                padding=padding,
+                                                output_padding=output_padding,
+                                                groups=groups, bias=bias,
+                                                dilation=dilation)
+        self.coord_adder = AddCoordinates(with_r)
+
+    def forward(self, x):
+        x = self.coord_adder(x)
+        return self.conv_tr_layer(x)
+
+
 class MaskedConv2d(nn.Conv2d):
     ''' from jmtomczak's github '''
     def __init__(self, mask_type, *args, **kwargs):
@@ -101,18 +266,19 @@ class MaskedConv2d(nn.Conv2d):
 class GatedConv2d(nn.Module):
     '''from jmtomczak's github '''
     def __init__(self, input_channels, output_channels, kernel_size,
-                 stride, padding=0, dilation=1, activation=None, bias=True):
+                 stride, padding=0, dilation=1, activation=None, bias=True,
+                 layer_type=nn.Conv2d):
         super(GatedConv2d, self).__init__()
 
         self.activation = activation
         self.sigmoid = nn.Sigmoid()
 
-        self.h = nn.Conv2d(input_channels, output_channels, kernel_size,
-                           stride=stride, padding=padding,
-                           dilation=dilation, bias=bias)
-        self.g = nn.Conv2d(input_channels, output_channels, kernel_size,
-                           stride=stride, padding=padding,
-                           dilation=dilation, bias=bias)
+        self.h = layer_type(input_channels, output_channels, kernel_size,
+                            stride=stride, padding=padding,
+                            dilation=dilation, bias=bias)
+        self.g = layer_type(input_channels, output_channels, kernel_size,
+                            stride=stride, padding=padding,
+                            dilation=dilation, bias=bias)
 
     def forward(self, x):
         if self.activation is None:
@@ -138,30 +304,6 @@ class GatedDense(nn.Module):
 
         # for weight-norm applications
         self.weight = self.h.weight
-
-    def forward(self, x):
-        if self.activation is None:
-            h = self.h(x)
-        else:
-            h = self.activation( self.h( x ) )
-
-        g = self.sigmoid( self.g( x ) )
-
-        return h * g
-
-
-class GatedConvTranspose2d(nn.Module):
-    ''' from jmtomczak's github'''
-    def __init__(self, input_channels, output_channels, kernel_size,
-                 stride, padding=0, dilation=1, activation=None, bias=True):
-        super(GatedConvTranspose2d, self).__init__()
-
-        self.activation = activation
-        self.sigmoid = nn.Sigmoid()
-        self.h = nn.ConvTranspose2d(input_channels, output_channels, kernel_size, stride=stride,
-                                    padding=padding, dilation=dilation, bias=bias)
-        self.g = nn.ConvTranspose2d(input_channels, output_channels, kernel_size, stride=stride,
-                                    padding=padding, dilation=dilation, bias=bias)
 
     def forward(self, x):
         if self.activation is None:
@@ -426,19 +568,22 @@ class ResnetBlock(nn.Module):
 
 
 class ResnetDeconvBlock(nn.Module):
-    def __init__(self, inplanes, planes, stride=1, downsample=None,
-                 normalization_str="groupnorm", activation_fn=nn.ReLU):
+    def __init__(self, inplanes, planes, stride=1, upsample=None,
+                 normalization_str="groupnorm", activation_fn=nn.ReLU, **kwargs):
         super(ResnetDeconvBlock, self).__init__()
+        layer_type = kwargs['layer_type'] if 'layer_type' in kwargs else ResnetDeconvBlock.deconv3x3
         self.gn_planes = int(min(np.ceil(planes / 2), 32))
-        self.conv1 = add_normalization(self.deconv3x3(inplanes, planes, stride),
+        self.conv1 = add_normalization(layer_type(inplanes, planes, stride),
                                        normalization_str, 2, planes, num_groups=self.gn_planes)
         #self.act = str_to_activ(activation_str)
         self.act = activation_fn()
-        self.conv2 = add_normalization(self.deconv3x3(planes, planes),
+        self.conv2 = add_normalization(layer_type(planes, planes),
                                        normalization_str, 2, planes, num_groups=self.gn_planes)
         self.stride = stride
-        self.downsample = self.downsampler(inplanes, planes, normalization_str) \
-            if downsample is not None else None
+        self.upsampler = add_normalization(
+            nn.ConvTranspose2d(inplanes, planes, stride),
+            normalization_str, 2, planes, num_groups=self.gn_planes) \
+            if upsample is not None else None
 
     @staticmethod
     def deconv3x3(in_planes, out_planes, stride=1):
@@ -447,10 +592,15 @@ class ResnetDeconvBlock(nn.Module):
         return nn.ConvTranspose2d(in_planes, out_planes, kernel_size=3, stride=stride,
                                   padding=0, bias=False)
 
-    def downsampler(self, inplanes, planes, normalization_str):
-        return add_normalization(nn.ConvTranspose2d(inplanes, planes, kernel_size=1,
-                                                    stride=self.stride, bias=False),
-                                 normalization_str, 2, planes, num_groups=self.gn_planes)
+    @staticmethod
+    def gated_deconv3x3(in_planes, out_planes, stride=1):
+        """3x3 convolution with padding"""
+        return GatedConvTranspose2d(in_planes, out_planes, kernel_size=3, stride=stride,
+                                    padding=0, bias=False)
+
+    def upsample(self, x, output_shape, mode='bilinear'):
+        upsampled = self.upsampler(x)
+        return F.upsample(upsampled, size=output_shape[-2:], mode=mode, align_corners=True)
 
     def forward(self, x):
         residual = x
@@ -459,10 +609,10 @@ class ResnetDeconvBlock(nn.Module):
         out = self.act(out)
         out = self.conv2(out)
 
-        if self.downsample is not None:
-            residual = self.downsample(x)
+        if self.upsampler is not None:
+            residual = self.upsample(x, out.shape)
 
-        print("out = ", out.shape, " | res = ", residual.shape, " | x = ", x.shape)
+        # print("out = ", out.shape, " | res = ", residual.shape, " | x = ", x.shape)
         out += residual
         out = self.act(out)
 
@@ -547,7 +697,7 @@ def build_relational_conv_encoder(input_shape, filter_depth=32,
     upsampler = nn.Upsample(size=bilinear_size, mode='bilinear', align_corners=True)
     chans = input_shape[0]
     return nn.Sequential(
-        upsampler if input_shape[1:] != bilinear_size else Identity(),
+        upsampler if list(input_shape[1:]) != list(bilinear_size) else Identity(),
         # input dim: num_channels x 32 x 32
         nn.Conv2d(chans, filter_depth, 5, stride=1, bias=True),
         nn.BatchNorm2d(filter_depth),
@@ -643,6 +793,24 @@ def build_gated_conv_encoder(input_shape, output_size, filter_depth=32,
                                filter_depth=filter_depth, activation_fn=activation_fn,
                                num_layers=num_layers, normalization_str=normalization_str, **kwargs)
 
+
+def build_coord_conv_encoder(input_shape, output_size, filter_depth=32,
+                             activation_fn=Identity, num_layers=4,
+                             normalization_str="none", **kwargs):
+    return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=CoordConv,
+                               filter_depth=filter_depth, activation_fn=activation_fn,
+                               num_layers=num_layers, normalization_str=normalization_str, **kwargs)
+
+
+def build_gated_coord_conv_encoder(input_shape, output_size, filter_depth=32,
+                             activation_fn=Identity, num_layers=4,
+                             normalization_str="none", **kwargs):
+    layer_type = functools.partial(GatedConv2d, layer_type=CoordConv)
+    return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=layer_type,
+                               filter_depth=filter_depth, activation_fn=activation_fn,
+                               num_layers=num_layers, normalization_str=normalization_str, **kwargs)
+
+
 def build_conv_encoder(input_shape, output_size, filter_depth=32,
                        activation_fn=nn.SELU, num_layers=4,
                        normalization_str="none", **kwargs):
@@ -665,6 +833,43 @@ def build_resnet_encoder(input_shape, output_size, filter_depth=32,
         ResnetBlock(filter_depth*4, filter_depth*2, stride=2, normalization_str=normalization_str, downsample=True, activation_fn=activation_fn, **kwargs),
         ResnetBlock(filter_depth*2, filter_depth, stride=2, normalization_str=normalization_str, downsample=True, activation_fn=activation_fn, **kwargs),
         ResnetBlock(filter_depth, output_size, stride=2, normalization_str=normalization_str, downsample=True, activation_fn=activation_fn, **kwargs),
+        nn.Conv2d(output_size, output_size, kernel_size=1, stride=1),
+        Squeeze()
+    )
+
+
+def _build_resnet_encoder(input_shape, output_size, layer_type=ResnetBlock.conv3x3,
+                          filter_depth=32, activation_fn=Identity, num_layers=5,
+                          normalization_str="none", **kwargs):
+    bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
+    upsampler = nn.Upsample(size=bilinear_size, mode='bilinear', align_corners=True)
+    chans = input_shape[0]
+
+    def _make_layer(input_size, filter_depth, downsample, stride=1):
+        return ResnetBlock(input_size, filter_depth, stride=stride, downsample=downsample, layer_type=layer_type,
+                           normalization_str=normalization_str, activation_fn=activation_fn, **kwargs)
+
+    # build the second to N-1 layers
+    strides = [2 if i % 2 == 0 else 1 for i in range(num_layers)]
+    intermediary_layers = [
+        _make_layer(filter_depth*(2**i), filter_depth*(2**j), downsample=True, stride=s) for i, j, s in zip(range(0, num_layers),
+                                                                                                            range(1, num_layers+1),
+                                                                                                            strides)
+    ]
+
+    return nn.Sequential(
+        upsampler if list(input_shape[1:]) != list(bilinear_size) else Identity(),
+
+        # input dim: num_channels x 32 x 32
+        _make_layer(chans, filter_depth, downsample=True, stride=2),
+
+        # add dynamic intermediary layers
+        *intermediary_layers,
+
+        # state dim: 512 x 1 x 1
+        _make_layer(filter_depth*(2**num_layers), output_size, downsample=True, stride=2),
+
+        # output dim: opt.z_dim x 1 x 1
         nn.Conv2d(output_size, output_size, kernel_size=1, stride=1),
         Squeeze()
     )
@@ -696,7 +901,7 @@ def _build_conv_encoder(input_shape, output_size, layer_type=nn.Conv2d,
     num_init_groups = max(int(min(np.ceil(filter_depth / 2), 32)), 1)
     num_final_groups = max(int(min(np.ceil(filter_depth*(2**num_layers) / 2), 32)), 1)
     return nn.Sequential(
-        upsampler if input_shape[1:] != bilinear_size else Identity(),
+        upsampler if list(input_shape[1:]) != list(bilinear_size) else Identity(),
         # input dim: num_channels x 32 x 32
         add_normalization(layer_type(chans, filter_depth, 5, stride=1),
                           normalization_str, 2, filter_depth, num_groups=num_init_groups),
@@ -734,9 +939,10 @@ def _build_conv_decoder(input_size, output_shape, layer_type=nn.ConvTranspose2d,
     # build the second to N-1 layers
     strides = [2 if i % 2 == 0 else 1 for i in range(num_layers)]
     intermediary_layers = [
-        _make_layer(filter_depth*(2**i), filter_depth*(2**j), stride=s) for i, j, s in zip(range(num_layers, -1, -1),
-                                                                                           range(num_layers-1, -1, -1),
-                                                                                           strides)
+        _make_layer(
+            filter_depth*(2**i), filter_depth*(2**j), stride=s) for i, j, s in zip(range(num_layers, -1, -1),
+                                                                                   range(num_layers-1, -1, -1),
+                                                                                   strides)
     ]
 
     num_init_groups = max(int(min(np.ceil(filter_depth*(2**num_layers) / 2), 32)), 1)
@@ -759,7 +965,50 @@ def _build_conv_decoder(input_size, output_shape, layer_type=nn.ConvTranspose2d,
         # state dim: 32 x 32 x 32
         nn.Conv2d(filter_depth, chans, 1, stride=1, bias=True),
         # output dim: num_channels x 32 x 32
-        upsampler if output_shape[1:] != bilinear_size and reupsample else Identity()
+        upsampler if reupsample else Identity()
+    )
+
+
+def _build_resnet_decoder(input_size, output_shape, layer_type=ResnetDeconvBlock.deconv3x3,
+                          filter_depth=32, activation_fn=nn.SELU, num_layers=3,
+                          normalization_str='none', reupsample=True, **kwargs):
+    '''Conv/FC --> BN --> Activ --> Dropout'''
+    bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
+    chans = output_shape[0]
+    upsampler = nn.Upsample(size=output_shape[1:], mode='bilinear', align_corners=True)
+
+    def _make_layer(input_chans, filter_depth, upsample, stride=1):
+        return ResnetDeconvBlock(input_chans, filter_depth, stride=stride,
+                                 upsample=upsample, layer_type=layer_type,
+                                 normalization_str=normalization_str,
+                                 activation_fn=activation_fn)
+
+    # build the second to N-1 layers
+    strides = [2 if i % 2 == 0 else 1 for i in range(num_layers)]
+    upsamples = [True if i % 2 == 0 else False for i in range(num_layers)]
+    intermediary_layers = [
+        _make_layer(filter_depth*(2**i), filter_depth*(2**j), upsample=u ,stride=s) for i, j, s, u in zip(range(num_layers, -1, -1),
+                                                                                                          range(num_layers-1, -1, -1),
+                                                                                                          strides,
+                                                                                                          upsamples)
+    ]
+
+    return nn.Sequential(
+        View([-1, input_size, 1, 1]),
+        # input dim: z_dim x 1 x 1
+        _make_layer(input_size, filter_depth*(2**num_layers), upsample=False, stride=1),
+
+        # add intermediary layers
+        *intermediary_layers,
+
+        # state dim: 32 x 28 x 28
+        _make_layer(filter_depth, filter_depth, upsample=False, stride=1),
+
+        # state dim: 32 x 32 x 32
+        nn.Conv2d(filter_depth, chans, 1, stride=1, bias=True),
+
+        # output dim: num_channels x 32 x 32
+        upsampler if reupsample else Identity()
     )
 
 
@@ -767,10 +1016,32 @@ def build_gated_conv_decoder(input_size, output_shape, filter_depth=32,
                              activation_fn=Identity, num_layers=3,
                              normalization_str="none", reupsample=True, **kwargs):
     ''' helper that calls the builder function with GatedConvTranspose2d'''
+    layer_type = functools.partial(GatedConv2d, layer_type=nn.ConvTranspose2d)
     return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
                                filter_depth=filter_depth, activation_fn=activation_fn,
                                num_layers=num_layers, normalization_str=normalization_str,
-                               reupsample=reupsample, layer_type=GatedConvTranspose2d, **kwargs)
+                               reupsample=reupsample, layer_type=layer_type, **kwargs)
+
+
+def build_gated_coord_conv_decoder(input_size, output_shape, filter_depth=32,
+                                   activation_fn=Identity, num_layers=3,
+                                   normalization_str="none", reupsample=True, **kwargs):
+    ''' helper that calls the builder function with GatedCoordConv'''
+    layer_type = functools.partial(GatedConv2d, layer_type=CoordConvTranspose)
+    return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
+                               filter_depth=filter_depth, activation_fn=activation_fn,
+                               num_layers=num_layers, normalization_str=normalization_str,
+                               reupsample=reupsample, layer_type=layer_type, **kwargs)
+
+
+def build_coord_conv_decoder(input_size, output_shape, filter_depth=32,
+                             activation_fn=Identity, num_layers=3,
+                             normalization_str="none", reupsample=True, **kwargs):
+    ''' helper that calls the builder function with CoordConvTranspose'''
+    return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
+                               filter_depth=filter_depth, activation_fn=activation_fn,
+                               num_layers=num_layers, normalization_str=normalization_str,
+                               reupsample=reupsample, layer_type=CoordConvTranspose, **kwargs)
 
 
 def build_conv_decoder(input_size, output_shape, filter_depth=32,
@@ -817,7 +1088,7 @@ def build_dense_encoder(input_shape, output_size, latent_size=512, num_layers=2,
 
 def build_gated_dense_encoder(input_shape, output_size, latent_size=512, num_layers=2,
                               activation_fn=nn.SELU, normalization_str="none", **kwargs):
-    ''' flatten --> layer + norm --> activation -->... --> Linear output --> view'''
+    ''' flatten --> layer + norm --> activation -->... --> Linear output --> view '''
     return _build_dense(input_shape, output_size, latent_size, num_layers,
                         activation_fn, normalization_str, layer=GatedDense, **kwargs)
 
@@ -842,11 +1113,11 @@ def get_encoder(config, name='encoder'):
         'relational': build_relational_conv_encoder,
         'resnet': {
             # True for gated, False for non-gated
-            True: functools.partial(build_resnet_encoder,
+            True: functools.partial(_build_resnet_encoder,
                                     layer_type=ResnetBlock.gated_conv3x3,
                                     filter_depth=config['filter_depth'],
                                     normalization_str=config['conv_normalization']),
-            False: functools.partial(build_resnet_encoder,
+            False: functools.partial(_build_resnet_encoder,
                                      layer_type=ResnetBlock.conv3x3,
                                      filter_depth=config['filter_depth'],
                                      normalization_str=config['conv_normalization'])
@@ -857,6 +1128,15 @@ def get_encoder(config, name='encoder'):
                                     filter_depth=config['filter_depth'],
                                     normalization_str=config['conv_normalization']),
             False: functools.partial(build_conv_encoder,
+                                     filter_depth=config['filter_depth'],
+                                     normalization_str=config['conv_normalization'])
+        },
+        'coordconv': {
+            # True for gated, False for non-gated
+            True: functools.partial(build_gated_coord_conv_encoder,
+                                    filter_depth=config['filter_depth'],
+                                    normalization_str=config['conv_normalization']),
+            False: functools.partial(build_coord_conv_encoder,
                                      filter_depth=config['filter_depth'],
                                      normalization_str=config['conv_normalization'])
         },
@@ -884,6 +1164,17 @@ def get_encoder(config, name='encoder'):
 def get_decoder(config, reupsample=True, name='decoder'):
     ''' helper to return the correct decoder function'''
     net_map = {
+        'resnet': {
+            # True for gated, False for non-gated
+            True: functools.partial(_build_resnet_decoder,
+                                    layer_type=ResnetDeconvBlock.gated_deconv3x3,
+                                    filter_depth=config['filter_depth'],
+                                    normalization_str=config['conv_normalization']),
+            False: functools.partial(_build_resnet_decoder,
+                                     layer_type=ResnetDeconvBlock.deconv3x3,
+                                     filter_depth=config['filter_depth'],
+                                     normalization_str=config['conv_normalization'])
+        },
         'conv': {
             # True for gated, False for non-gated
             True: functools.partial(build_gated_conv_decoder,
@@ -891,6 +1182,17 @@ def get_decoder(config, reupsample=True, name='decoder'):
                                     reupsample=reupsample,
                                     normalization_str=config['conv_normalization']),
             False: functools.partial(build_conv_decoder,
+                                     filter_depth=config['filter_depth'],
+                                     reupsample=reupsample,
+                                     normalization_str=config['conv_normalization'])
+        },
+        'coordconv': {
+            # True for gated, False for non-gated
+            True: functools.partial(build_gated_coord_conv_decoder,
+                                    filter_depth=config['filter_depth'],
+                                    reupsample=reupsample,
+                                    normalization_str=config['conv_normalization']),
+            False: functools.partial(build_coord_conv_decoder,
                                      filter_depth=config['filter_depth'],
                                      reupsample=reupsample,
                                      normalization_str=config['conv_normalization'])
