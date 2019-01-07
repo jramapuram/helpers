@@ -271,6 +271,7 @@ def plot_tensor_grid(batch_tensor, save_filename=None):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+
     grid_img = torchvision.utils.make_grid(batch_tensor, nrow=5)
     plt.imshow(grid_img.permute(1, 2, 0))
     if save_filename is not None:
@@ -350,7 +351,7 @@ def to_data(tensor_or_var):
     return tensor_or_var
 
 
-def eps(half):
+def eps(half=False):
     return 1e-2 if half else 1e-6
 
 
@@ -477,18 +478,39 @@ def network_to_half(network):
 
 
 def nan_check_and_break(tensor, name=""):
-    if torch.sum(torch.isnan(tensor)) > 0:
-        print("tensor {} of {} dim was NaN!!".format(name, tensor.shape))
-        exit(-1)
+    if isinstance(input, list) or isinstance(input, tuple):
+        for tensor in input:
+            return(nan_check_and_break(tensor, name))
+    else:
+        if nan_check(tensor, name) is True:
+            exit(-1)
 
-    if torch.sum(tensor == np.inf) > 0:
-        print("tensor {} of {} dim was INF!!".format(name, tensor.shape))
-        exit(-1)
+
+def nan_check(tensor, name=""):
+    if isinstance(input, list) or isinstance(input, tuple):
+        for tensor in input:
+            return(nan_check(tensor, name))
+    else:
+        if torch.sum(torch.isnan(tensor)) > 0:
+            print("Tensor {} with shape {} was NaN.".format(name, tensor.shape))
+            return True
+
+        elif torch.sum(torch.isinf(tensor)) > 0:
+            print("Tensor {} with shape {} was Inf.".format(name, tensor.shape))
+            return True
+
+    return False
 
 
 def zero_check_and_break(tensor, name=""):
     if torch.sum(tensor == 0).item() > 0:
         print("tensor {} of {} dim contained ZERO!!".format(name, tensor.shape))
+        exit(-1)
+
+
+def all_zero_check_and_break(tensor, name=""):
+    if torch.sum(tensor == 0).item() == np.prod(list(tensor.shape)):
+        print("tensor {} of {} dim was all zero".format(name, tensor.shape))
         exit(-1)
 
 
