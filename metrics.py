@@ -10,16 +10,26 @@ from .utils import to_data, float_type, int_type, \
     num_samples_in_loader, zero_pad_smaller_cat, zeros_like
 
 
-def softmax_correct(preds, targets):
-    pred = to_data(preds).max(1)[1]  # get the index of the max log-probability
-    assert len(targets.shape) == 1, "expecting 1d target indices"
+def softmax_correct(preds, targets, dim=-1):
+    preds_max = to_data(preds).max(dim=dim)[1]  # get the index of the max log-probability
+    assert targets.shape == preds_max.shape, \
+        "target[{}] shape does not match preds[{}]".format(targets.shape, preds_max.shape)
     targ = to_data(targets)
-    return pred.eq(targ).cpu().type(torch.FloatTensor)
+    return preds_max.eq(targ).cpu().type(torch.FloatTensor)
 
 
-def softmax_accuracy(preds, targets, size_average=True):
+def softmax_accuracy(preds, targets, size_average=True, dim=-1):
     reduction_fn = torch.mean if size_average is True else torch.sum
-    return reduction_fn(softmax_correct(preds, targets))
+    return reduction_fn(softmax_correct(preds, targets, dim=dim))
+
+
+def all_or_none_accuracy(preds, targets, size_average=True, dim=-1):
+    preds_max = to_data(preds).max(dim=dim)[1]  # get the index of the max log-probability
+    assert targets.shape == preds_max.shape, \
+        "target[{}] shape does not match preds[{}]".format(targets.shape, preds_max.shape)
+    targ = to_data(targets)
+    reduction_fn = torch.mean if size_average is True else torch.sum
+    return reduction_fn(preds_max.eq(targ).cpu().all(dim=dim).type(torch.float32))
 
 
 def bce_accuracy(pred_logits, targets, size_average=True):
@@ -86,7 +96,7 @@ def calculate_fid(fid_model, model, loader, grapher,
                                               num_samples=num_samples,
                                               cuda=cuda)
     if grapher:
-        grapher.vis.text(str(fid), opts=dict(title="FID"))
+        grapher.add_text('FID', str(fid), 0, append=True)
 
     return fid
 
@@ -109,10 +119,11 @@ def calculate_fid_from_generated_images(fid_model, model, data_loader,
         for data, _ in data_loader.test_loader:
             data = Variable(data).cuda() if cuda else Variable(data)
             batch_size = data.size(0)
-            assert fid_model.batch_size <= batch_size
+            assert fid_model.batch_size <= batch_size, \
+                "FID batch {} <= loader batch {}".format(fid_model.batch_size, batch_size)
             for begin, end in zip(range(0, batch_size, fid_model.batch_size),
                                   range(fid_model.batch_size, batch_size+1, fid_model.batch_size)):
-                generated = model.generate_synthetic_samples(model.student, batch_size, soft_prior=False)
+                generated = model.generate_synthetic_samples(batch_size)
                 _, test_features = fid_model(data[begin:end])
                 _, generated_features = fid_model(generated[begin:end])
                 test_features = test_features.view(fid_model.batch_size, -1)

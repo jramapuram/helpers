@@ -18,10 +18,10 @@ def nll_activation(logits, nll_type, **kwargs):
         # return fn(logits, **kwargs)
         return fn(logits, nr_mix=10)
     elif nll_type == "gaussian":
-        num_half_chans = logits.size(1) // 2
-        logits_mu = logits[:, 0:num_half_chans, :, :]
-        #return torch.sigmoid(logits_mu)
-        return logits_mu
+        # num_half_chans = logits.size(1) // 2
+        # logits_mu = logits[:, 0:num_half_chans, :, :]
+        # return torch.sigmoid(logits)
+        return logits
     elif nll_type == "bernoulli":
         return torch.sigmoid(logits)
     else:
@@ -81,17 +81,24 @@ def nll_laplace(x, recon, half=False):
     return -torch.sum(nll, dim=-1)
 
 
-def nll_gaussian(x, recon, half=False):
-    batch_size, num_half_chans = x.size(0), recon.size(1) // 2
-    recon_mu = recon[:, 0:num_half_chans, :, :].contiguous()
-    recon_logvar = recon[:, num_half_chans:, :, :].contiguous()
+def nll_gaussian(x, recon_mu, half=False):
+    batch_size = x.size(0)
+    return torch.sum(
+        F.mse_loss(input=recon_mu.view(batch_size, -1),
+                   target=x.view(batch_size, -1),
+                   reduction='none')
+    )
 
-    # XXX: currently broken, so set var to 1
-    #recon_logvar = ones_like(recon_mu)
+    # #recon_mu = recon[:, 0:num_half_chans, :, :].contiguous()
+    # #recon_logvar = recon[:, num_half_chans:, :, :].contiguous()
 
-    nll = D.Normal(
-        recon_mu.view(batch_size, -1),
-        #F.hardtanh(recon_logvar.view(batch_size, -1), min_val=-4.5, max_val=0) + 1e-6
-        F.sigmoid(recon_logvar.view(batch_size, -1)) + eps(half)
-    ).log_prob(x.view(batch_size, -1))
-    return -torch.sum(nll, dim=-1)
+    # # XXX: currently broken, so set var to 1
+    # recon_logvar = ones_like(recon_mu)
+
+    # nll = D.Normal(
+    #     recon_mu.view(batch_size, -1),
+    #     #F.hardtanh(recon_logvar.view(batch_size, -1), min_val=-4.5, max_val=0) + 1e-6
+    #     #F.sigmoid(recon_logvar.view(batch_size, -1)) + eps(half)
+    #     recon_logvar.view(batch_size, -1)
+    # ).log_prob(x.view(batch_size, -1))
+    # return -torch.sum(nll, dim=-1)

@@ -12,7 +12,6 @@ from collections import Counter
 from torchvision.models.inception import InceptionA, InceptionB, \
     InceptionC, InceptionD, InceptionE, BasicConv2d, InceptionAux
 
-from optimizers.adamnormgrad import AdamNormGrad
 from datasets.loader import get_loader
 from datasets.utils import GenericLoader, label_offset_merger, simple_merger
 
@@ -26,7 +25,6 @@ def build_optimizer(model, args):
     optim_map = {
         "rmsprop": optim.RMSprop,
         "adam": optim.Adam,
-        "adamnorm": AdamNormGrad,
         "adadelta": optim.Adadelta,
         "sgd": optim.SGD,
         "lbfgs": optim.LBFGS
@@ -106,7 +104,12 @@ def test(epoch, model, data_loader, args):
 
 def train_fid_model(args, fid_type='conv', batch_size=32):
     ''' builds and trains a classifier '''
-    loader = get_loader(args)
+    if args.task == 'image_folder':
+        resizer = transforms.Resize((299, 299))
+        loader = get_loader(args, transform=[resizer], **vars(args))
+    else:
+        loader = get_loader(args, **vars(args))
+
     if isinstance(loader, list): # has a sequential loader
         loader = simple_merger(loader, batch_size, args.cuda)
 

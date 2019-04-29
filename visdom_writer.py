@@ -121,6 +121,22 @@ class VisdomWriter:
         self.vis.histogram(make_np(values), opts={'title': tag})
         self.save()
 
+
+    def add_heatmap(self, tag, values, global_step=None):
+        """Add histogram to summary.
+
+        Args:
+            tag (string): Data identifier
+            values (torch.Tensor, numpy.array, or string/blobname): Values to build histogram
+            global_step (int): Global step value to record
+            bins (string): one of {'tensorflow', 'auto', 'fd', ...}, this determines how the bins are made. You can find
+              other options in: https://docs.scipy.org/doc/numpy/reference/generated/numpy.histogram.html
+        """
+        values = make_np(values)
+        self.vis.heatmap(make_np(values), opts={'title': tag})
+        self.save()
+
+
     def add_image(self, tag, img_tensor, global_step=None, caption=None):
         """Add image data to summary.
 
@@ -209,7 +225,7 @@ class VisdomWriter:
         self.vis.audio(tensor=snd_tensor, opts={'sample_frequency': sample_rate})
         self.save()
 
-    def add_text(self, tag, text_string, global_step=None):
+    def add_text(self, tag, text_string, global_step=None, append=False):
         """Add text data to summary.
 
         Args:
@@ -220,10 +236,13 @@ class VisdomWriter:
             writer.add_text('lstm', 'This is an lstm', 0)
             writer.add_text('rnn', 'This is an rnn', 10)
         """
+        append = append if global_step > 0 else False
         if text_string is None:
             # Visdom doesn't support tags, write the tag as the text_string
             text_string = tag
-        self.vis.text(text_string)
+            self.vis.text(text_string, append=append)
+        else:
+            self.vis.text(text_string, win=tag, append=append)
         # self.save(), MEH: don't save env just because of text
 
     def add_graph_onnx(self, prototxt):

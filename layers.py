@@ -15,7 +15,7 @@ class View(nn.Module):
         self.shape = shape
 
     def forward(self, input):
-        return input.view(*self.shape)
+        return input.contiguous().view(*self.shape)
 
 
 class Squeeze(nn.Module):
@@ -461,15 +461,28 @@ class EarlyStopping(object):
         self.iteration += 1
         return is_early_stop
 
-def flatten_layers(model, base_index=0):
+
+def flatten_layers(model, base_index=0, is_recursive=False):
+    """ flattens sequential - sequentials
+
+    :param model: the wrapped sequential model
+    :param base_index: the current layer index
+    :param is_recursive: an internal param for recursive calls
+    :returns: an nn.Sequential that is unrolled
+    :rtype: nn.Sequential
+
+    """
     layers = []
     for l in model.children():
         if isinstance(l, nn.Sequential):
-            sub_layers, base_index = flatten_layers(l, base_index)
+            sub_layers, base_index = flatten_layers(l, base_index, is_recursive=True)
             layers.extend(sub_layers)
         else:
             layers.append(('layer_%d'%base_index, l))
             base_index += 1
+
+    if not is_recursive:
+        return nn.Sequential(OrderedDict(layers)), base_index
 
     return layers, base_index
 
