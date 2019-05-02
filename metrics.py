@@ -4,10 +4,12 @@ import torch.nn.functional as F
 import torch.distributions as D
 
 from scipy import linalg
+from torchvision import transforms
 from torch.autograd import Variable
 
 from .utils import to_data, float_type, int_type, \
     num_samples_in_loader, zero_pad_smaller_cat, zeros_like
+from .msssim import MultiScaleSSIM
 
 
 def softmax_correct(preds, targets, dim=-1):
@@ -39,6 +41,25 @@ def bce_accuracy(pred_logits, targets, size_average=True):
     targets = targets.type(int_type(cuda))
     reduction_fn = torch.mean if size_average is True else torch.sum
     return reduction_fn(pred.eq(targets).cpu().type(torch.FloatTensor))
+
+
+def calculate_mssim(reconstr_image, minibatch):
+    """ compute the ms-sim between an image and its reconstruction
+
+    :param reconstr_image: the reconstructed image
+    :param minibatch: the input minibatch
+    :returns: a score
+    :rtype: float
+
+    """
+    xform = transforms.ToPILImage()
+    reconstr_image_np = np.vstack([np.expand_dims(np.array(xform(ri)), 0) for ri in reconstr_image.detach().cpu()])
+    minibatch_np = np.vstack([np.expand_dims(np.array(xform(mi)), 0) for mi in minibatch.detach().cpu()])
+    reconstr_image_np = np.concatenate([np.expand_dims(reconstr_image_np, -1) for _ in range(3)], axis=-1) \
+        if len(reconstr_image_np.shape) == 3 else reconstr_image_np
+    minibatch_np = np.concatenate([np.expand_dims(minibatch_np, -1) for _ in range(3)], axis=-1) \
+        if len(minibatch_np.shape) == 3 else minibatch_np
+    return MultiScaleSSIM(reconstr_image_np, minibatch_np)
 
 
 def frechet_gauss_gauss_np(synthetic_features, test_features, eps=1e-6):

@@ -1231,3 +1231,37 @@ def get_decoder(config, reupsample=True, name='decoder'):
         name
     ))
     return fn
+
+
+def append_save_and_load_fns(model, prefix=""):
+    """ hax to add save and load functionality to use with early-stopping module
+
+    :param model: any torch module
+    :returns: same module
+    :rtype: module
+
+    """
+    def load(model, prefix=""):
+        # load the model if it exists
+        if os.path.isdir(args.model_dir):
+            model_filename = os.path.join(args.model_dir, prefix + get_name(args) + ".th")
+            if os.path.isfile(model_filename):
+                print("loading existing model: {}".format(model_filename))
+                model.load_state_dict(torch.load(model_filename), strict=True)
+                return True
+            else:
+                print("{} does not exist...".format(model_filename))
+
+        return False
+
+    def save(model, overwrite=False, prefix=""):
+        # save the model if it doesnt exist
+        check_or_create_dir(args.model_dir)
+        model_filename = os.path.join(args.model_dir, prefix + get_name(args) + ".th")
+        if not os.path.isfile(model_filename) or overwrite:
+            print("saving existing model to {}".format(model_filename))
+            torch.save(model.state_dict(), model_filename)
+
+    model.load = functools.partial(load, model=model, prefix=prefix)
+    model.save = functools.partial(save, model=model, prefix=prefix)
+    return model

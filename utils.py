@@ -514,6 +514,46 @@ def all_zero_check_and_break(tensor, name=""):
         exit(-1)
 
 
+def get_name(args):
+    """Takes the argparse and returns kv_kv1_...
+        Note that k is refactored as: 'conv_normalization' --> 'cn'
+        Also first takes the keys and asserts that there are no dupes
+
+    :param args: argparse
+    :returns: a unique name based on args
+    :rtype: str
+
+    """
+
+    vargs = deepcopy(vars(args))
+    blacklist_keys = ['visdom_url', 'visdom_port', 'data_dir', 'download', 'cuda', 'uid',
+                      'debug_step', 'model_dir', 'calculate_fid_with']
+    filtered = {k:v for k,v in vargs.items() if k not in blacklist_keys} # remove useless info
+
+    def _factor(name):
+        ''' returns first characters of strings with _ separations'''
+        if '_' not in name:
+            return name[0]
+
+        splits = name.split('_')
+        return ''.join([s[0] for s in splits])
+
+    # test if there are duplicate keys
+    factored_keys = [_factor(k) for k in filtered.keys()]
+    dupes_in_factored = set([x for x in factored_keys if factored_keys.count(x) > 1])
+    assert len(dupes_in_factored) == 0, \
+        "argparse truncation key duplicate detected: {}".format(dupes_in_factored)
+
+    # now filter into the final filter map and return
+    bool2int = lambda v: int(v) if isinstance(v, bool) else v
+    filtered = {_factor(k):bool2int(v) for k,v in filtered.items()}
+    return "{}_{}".format(
+        args.uid + "_" if args.uid else "",
+        "_".join(["{}{}".format(k, v) for k, v in filtered.items()])
+    ).replace('batchnorm', 'bn').replace('groupnorm', 'gn')
+
+
+
 def register_nan_checks(model):
     def check_grad(module, grad_input, grad_output):
         # print(module) you can add this to see that the hook is called
