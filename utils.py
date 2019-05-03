@@ -9,6 +9,8 @@ import scipy as sp
 import contextlib
 import torch.nn.functional as F
 import torch.distributions as D
+
+from copy import deepcopy
 from torch.autograd import Variable
 
 
@@ -544,13 +546,26 @@ def get_name(args):
     assert len(dupes_in_factored) == 0, \
         "argparse truncation key duplicate detected: {}".format(dupes_in_factored)
 
+    def _clean_task_str(task_str):
+        ''' helper to reduce string length.
+            eg: mnist+svhn+mnist --> mnist2svhn1 '''
+        result_str = ''
+        if '+' in task_str:
+            splits = Counter(task_str.split('+'))
+            for k, v in splits.items():
+                result_str += '{}{}'.format(k, v)
+
+            return result_str
+
+        return task_str
+
     # now filter into the final filter map and return
     bool2int = lambda v: int(v) if isinstance(v, bool) else v
     filtered = {_factor(k):bool2int(v) for k,v in filtered.items()}
-    return "{}_{}".format(
+    return _clean_task_str("{}_{}".format(
         args.uid + "_" if args.uid else "",
         "_".join(["{}{}".format(k, v) for k, v in filtered.items()])
-    ).replace('batchnorm', 'bn').replace('groupnorm', 'gn')
+    ).replace('batchnorm', 'bn').replace('groupnorm', 'gn'))
 
 
 
