@@ -835,7 +835,7 @@ def build_conv_encoder(input_shape, output_size, filter_depth=32,
 def build_resnet_encoder(input_shape, output_size, filter_depth=32,
                          activation_fn=nn.SELU, num_layers=None,
                          normalization_str="none", **kwargs):
-    warnings.warn("resnet encoder does not currently use num_layers")
+    warnings.warn("DEPRICATED: resnet encoder does not currently use num_layers")
     chans = input_shape[0]
     bilinear_size = kwargs['bilinear_size'] if 'bilinear_size' in kwargs else (64, 64)
     return nn.Sequential(
@@ -911,8 +911,11 @@ def _build_conv_encoder(input_shape, output_size, layer_type=nn.Conv2d,
                                                                                            strides)
     ]
 
+    # compute groups
     num_init_groups = max(int(min(np.ceil(filter_depth / 2), 32)), 1)
     num_final_groups = max(int(min(np.ceil(filter_depth*(2**num_layers) / 2), 32)), 1)
+
+    # build the main model
     return nn.Sequential(
         upsampler if list(input_shape[1:]) != list(bilinear_size) else Identity(),
         # input dim: num_channels x 32 x 32
@@ -924,11 +927,13 @@ def _build_conv_encoder(input_shape, output_size, layer_type=nn.Conv2d,
         *intermediary_layers,
 
         # state dim: 512 x 1 x 1
-        add_normalization(layer_type(filter_depth*(2**num_layers), filter_depth*(2**num_layers), 1, stride=1),
+        add_normalization(layer_type(filter_depth*(2**num_layers), filter_depth*(2**num_layers), 1, stride=1 if bilinear_size[0]==32 else 3),
                           normalization_str, 2, filter_depth*(2**num_layers), num_groups=num_final_groups),
         activation_fn(),
+
         # state dim: 512 x 1 x 1
         layer_type(filter_depth*(2**num_layers), output_size, 1, stride=1),
+
         # output dim: opt.z_dim x 1 x 1
         Squeeze()
     )
@@ -937,9 +942,10 @@ def _build_conv_decoder(input_size, output_shape, layer_type=nn.ConvTranspose2d,
                         filter_depth=32, activation_fn=nn.SELU, num_layers=3,
                         normalization_str='none', reupsample=True, **kwargs):
     '''Conv/FC --> BN --> Activ --> Dropout'''
-    bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
     chans = output_shape[0]
-    upsampler = nn.Upsample(size=output_shape[1:], mode='bilinear', align_corners=True)
+    if reupsample:
+        bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
+        upsampler = nn.Upsample(size=output_shape[1:], mode='bilinear', align_corners=True)
 
     def _make_layer(input_size, filter_depth, kernel_size=4, stride=1):
         gn_groups = max(int(min(np.ceil(filter_depth / 2), 32)), 1)
@@ -986,9 +992,10 @@ def _build_resnet_decoder(input_size, output_shape, layer_type=ResnetDeconvBlock
                           filter_depth=32, activation_fn=nn.SELU, num_layers=3,
                           normalization_str='none', reupsample=True, **kwargs):
     '''Conv/FC --> BN --> Activ --> Dropout'''
-    bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
     chans = output_shape[0]
-    upsampler = nn.Upsample(size=output_shape[1:], mode='bilinear', align_corners=True)
+    if reupsample:
+        bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
+        upsampler = nn.Upsample(size=output_shape[1:], mode='bilinear', align_corners=True)
 
     def _make_layer(input_chans, filter_depth, upsample, stride=1):
         return ResnetDeconvBlock(input_chans, filter_depth, stride=stride,
@@ -1120,8 +1127,39 @@ def build_dense_decoder(input_size, output_shape, latent_size=512, num_layers=3,
                         activation_fn, normalization_str, layer=nn.Linear, **kwargs)
 
 
+def _get_num_layers(layer_str, input_shape, is_encoder=True):
+    """ Internal helper to get layer sizing for images
+
+    :param layer_str: the string layer type
+    :param is_encoder: False if using a decoder
+    :returns: the number of layers for the given size
+    :rtype: int
+
+    """
+    largest_image_dim = max(input_shape[1], input_shape[2])
+    input_size = min([256, 128, 64, 32], key=lambda x: abs(x - largest_image_dim))
+    num_layer_encoder_dict = {
+        'conv': {256: 9, 128: 7, 64: 5, 32: 4},
+        'coordconv': {256: 9, 128: 7, 64: 5, 32: 4},
+        'resnet': {256: 11, 128: 9, 64: 7, 32: 6},
+        'dense': {256: 3, 128: 3, 64: 3, 32: 3},
+    }
+
+    # NOTE: decoder layer-sizing is approximate, over-estimates a little.
+    #       It needs to be coupled with an upsample, use reupsample=True
+    num_layer_decoder_dict = {
+        'conv': {256: 9, 128: 7, 64: 5, 32: 3},
+        'coordconv': {256: 9, 128: 7, 64: 5, 32: 3},
+        'resnet': {256: 9, 128: 7, 64: 5, 32: 3},
+        'dense': {256: 3, 128: 3, 64: 3, 32: 3},
+    }
+    return [num_layer_encoder_dict[layer_str][input_size], input_size] if is_encoder \
+        else [num_layer_decoder_dict[layer_str][input_size], input_size]
+
+
 def get_encoder(config, name='encoder'):
     ''' helper to return the correct encoder function from argparse'''
+    num_layers, determined_size = _get_num_layers(config['encoder_layer_type'], config['input_shape'])
     net_map = {
         'relational': build_relational_conv_encoder,
         'resnet': {
@@ -1129,39 +1167,54 @@ def get_encoder(config, name='encoder'):
             True: functools.partial(_build_resnet_encoder,
                                     layer_type=ResnetBlock.gated_conv3x3,
                                     filter_depth=config['filter_depth'],
+                                    num_layers=num_layers,
+                                    bilinear_size=(determined_size, determined_size),
                                     normalization_str=config['conv_normalization']),
             False: functools.partial(_build_resnet_encoder,
                                      layer_type=ResnetBlock.conv3x3,
                                      filter_depth=config['filter_depth'],
+                                     num_layers=num_layers,
+                                     bilinear_size=(determined_size, determined_size),
                                      normalization_str=config['conv_normalization'])
         },
         'conv': {
             # True for gated, False for non-gated
             True: functools.partial(build_gated_conv_encoder,
                                     filter_depth=config['filter_depth'],
+                                    num_layers=num_layers,
+                                    bilinear_size=(determined_size, determined_size),
                                     normalization_str=config['conv_normalization']),
             False: functools.partial(build_conv_encoder,
                                      filter_depth=config['filter_depth'],
+                                     num_layers=num_layers,
+                                     bilinear_size=(determined_size, determined_size),
                                      normalization_str=config['conv_normalization'])
         },
         'coordconv': {
             # True for gated, False for non-gated
             True: functools.partial(build_gated_coord_conv_encoder,
                                     filter_depth=config['filter_depth'],
+                                    num_layers=num_layers,
+                                    bilinear_size=(determined_size, determined_size),
                                     normalization_str=config['conv_normalization']),
             False: functools.partial(build_coord_conv_encoder,
                                      filter_depth=config['filter_depth'],
+                                     num_layers=num_layers,
+                                     bilinear_size=(determined_size, determined_size),
                                      normalization_str=config['conv_normalization'])
         },
         'dense': {
             # True for gated, False for non-gated
             True: functools.partial(build_gated_dense_encoder,
                                     latent_size=config['latent_size'],
+                                    num_layers=num_layers,
+                                    bilinear_size=(determined_size, determined_size),
                                     normalization_str=config['dense_normalization']),
             False: functools.partial(build_dense_encoder,
                                      latent_size=config['latent_size'],
+                                     num_layers=num_layers,
+                                     bilinear_size=(determined_size, determined_size),
                                      normalization_str=config['dense_normalization'])
-
         }
     }
 
@@ -1176,16 +1229,19 @@ def get_encoder(config, name='encoder'):
 
 def get_decoder(config, reupsample=True, name='decoder'):
     ''' helper to return the correct decoder function'''
+    num_layers, _ = _get_num_layers(config['encoder_layer_type'], config['input_shape'], is_encoder=False)
     net_map = {
         'resnet': {
             # True for gated, False for non-gated
             True: functools.partial(_build_resnet_decoder,
                                     layer_type=ResnetDeconvBlock.gated_deconv3x3,
                                     filter_depth=config['filter_depth'],
+                                    num_layers=num_layers,
                                     normalization_str=config['conv_normalization']),
             False: functools.partial(_build_resnet_decoder,
                                      layer_type=ResnetDeconvBlock.deconv3x3,
                                      filter_depth=config['filter_depth'],
+                                     num_layers=num_layers,
                                      normalization_str=config['conv_normalization'])
         },
         'conv': {
@@ -1193,10 +1249,12 @@ def get_decoder(config, reupsample=True, name='decoder'):
             True: functools.partial(build_gated_conv_decoder,
                                     filter_depth=config['filter_depth'],
                                     reupsample=reupsample,
+                                    num_layers=num_layers,
                                     normalization_str=config['conv_normalization']),
             False: functools.partial(build_conv_decoder,
                                      filter_depth=config['filter_depth'],
                                      reupsample=reupsample,
+                                     num_layers=num_layers,
                                      normalization_str=config['conv_normalization'])
         },
         'coordconv': {
@@ -1204,26 +1262,29 @@ def get_decoder(config, reupsample=True, name='decoder'):
             True: functools.partial(build_gated_coord_conv_decoder,
                                     filter_depth=config['filter_depth'],
                                     reupsample=reupsample,
+                                    num_layers=num_layers,
                                     normalization_str=config['conv_normalization']),
             False: functools.partial(build_coord_conv_decoder,
                                      filter_depth=config['filter_depth'],
                                      reupsample=reupsample,
+                                     num_layers=num_layers,
                                      normalization_str=config['conv_normalization'])
         },
         'dense': {
             # True for gated, False for non-gated
             True: functools.partial(build_gated_dense_decoder,
                                     latent_size=config['latent_size'],
+                                    num_layers=num_layers,
                                     normalization_str=config['dense_normalization']),
             False: functools.partial(build_dense_decoder,
                                      latent_size=config['latent_size'],
+                                     num_layers=num_layers,
                                      normalization_str=config['dense_normalization'])
         }
     }
 
-    # NOTE: pixelcnn is added later
-    layer_type = "conv" if config['decoder_layer_type'] == "pixelcnn" \
-       or config['decoder_layer_type'] == "conv" else "dense"
+    # NOTE: pixelcnn is added later, override here
+    layer_type = "conv" if config['decoder_layer_type'] == "pixelcnn" else config['decoder_layer_type']
     fn = net_map[layer_type][not config['disable_gated']]
     print("using {} {} for {}".format(
         "gated" if not config['disable_gated'] else "standard",
