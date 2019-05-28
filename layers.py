@@ -56,6 +56,20 @@ class BWtoRGB(nn.Module):
         return x
 
 
+class EMA(nn.Module):
+    def __init__(self, decay=0.999):
+        super(EMA, self).__init__()
+        self.decay = decay
+        self.register_buffer('ema_val', None)
+
+    def forward(self, x):
+        if self.ema_val is None:
+            self.ema_val = torch.zeros_like(x)
+
+        self.ema_val = self.decay * x.detach() + (1 - self.decay) * self.ema_val
+        return self.ema_val
+
+
 class Rotate(nn.Module):
     def __init__(self, angle, resize_shape=None, resize_mode='bilinear', align_corners=True):
         ''' Accepts a batch of tensors, rotates by angle and returns a resized image,
