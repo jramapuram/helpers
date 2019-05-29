@@ -565,7 +565,11 @@ def get_name(args):
     return _clean_task_str("{}_{}".format(
         args.uid + "_" if args.uid else "",
         "_".join(["{}{}".format(k, v) for k, v in filtered.items()])
-    ).replace('batchnorm', 'bn').replace('groupnorm', 'gn'))
+    ).replace('batchnorm', 'bn').replace('groupnorm', 'gn')
+                           .replace('disc_mix_logistic', 'dml')
+                           .replace('pixelcnn', 'pcnn')
+                           .replace('isotropic_gaussian', 'ig')
+    )
 
 
 
