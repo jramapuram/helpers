@@ -60,6 +60,24 @@ def nll_bernoulli(x, recon_x_logits, half=False):
     return -torch.sum(nll, dim=-1)
 
 
+def log_logistic_256(x, recon_x_logits, half=False):
+    ''' from jmtomczak's github '''
+    bin_size = 1. / 256.
+    half_chans = recon_x_logits.size(1) // 2
+    mean = torch.clamp(F.sigmoid(recon_x_logits[:, 0:half_chans, :, :]), min=0.+1./512., max=1.-1./512.)
+    logvar = F.hardtanh(recon_x_logits[:, half_chans:, :, :], min_val=-4.5, max_val=0.)
+
+    # implementation like https://github.com/openai/iaf/blob/master/tf_utils/distributions.py#L28
+    scale = torch.exp(logvar)
+    x = (torch.floor(x / bin_size) * bin_size - mean) / scale
+    cdf_plus = torch.sigmoid(x + bin_size/scale)
+    cdf_minus = torch.sigmoid(x)
+
+    # calculate final log-likelihood for an image
+    log_logist_256 = -torch.log(cdf_plus - cdf_minus + 1.e-7)
+    return -torch.sum(log_logist_256, dim=-1)
+
+
 def nll_disc_mix_logistic(x, recon, half=False):
     assert len(x.shape) == len(recon.shape) == 4, "expecting 4d input for logistic loss"
     fn = discretized_mix_logistic_loss_1d if x.shape[1] == 1 \

@@ -1,4 +1,5 @@
 import gc
+import os
 import numpy as np
 import math
 import json
@@ -10,7 +11,7 @@ from tensorboardX.x2num import make_np
 
 
 class VisdomWriter:
-    def __init__(self, env, server, port=8097, use_incoming_socket=False):
+    def __init__(self, env, server, port=8097, use_incoming_socket=False, raise_exceptions=False):
         try:
             from visdom import Visdom
         except ImportError:
@@ -19,8 +20,13 @@ class VisdomWriter:
         self.env = env
         self.scalar_dict = {}
         self.server_connected = False
+        if not os.path.isdir('runs'):
+            os.makedirs('runs')
+
         self.vis = Visdom(server=server, port=port, env=env,
-                          use_incoming_socket=use_incoming_socket)
+                          log_to_filename=os.path.join('runs', env + ".log"),
+                          use_incoming_socket=use_incoming_socket,
+                          raise_exceptions=raise_exceptions)
         self.windows = {}
 
     def add_scalar(self, tag, scalar_value, global_step=None):

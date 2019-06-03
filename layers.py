@@ -261,6 +261,44 @@ class CoordConvTranspose(nn.Module):
         return self.conv_tr_layer(x)
 
 
+class MaskedResUnit(nn.Module):
+    ''' from jmtomczak's github '''
+    def __init__(self, mask_type, *args, **kwargs):
+        super(MaskedResUnit, self).__init__()
+
+        self.act = nn.ReLU(True)
+
+        self.h1 = MaskedConv2d(mask_type, *args, **kwargs)
+        self.h2 = MaskedConv2d(mask_type, *args, **kwargs)
+
+        self.bn1 = nn.BatchNorm2d(64)
+        self.bn2 = nn.BatchNorm2d(64)
+
+    def forward(self, x):
+        h1 = self.bn1(x)
+        h1 = self.act(h1)
+        h1 = self.h1(h1)
+
+        h2 = self.bn2(h1)
+        h2 = self.act(h2)
+        h2 = self.h2(h2)
+        return x + h2
+
+
+class MaskedGatedConv2d(nn.Module):
+    ''' from jmtomczak's github '''
+    def __init__(self, mask_type, *args, **kwargs):
+        super(MaskedGatedConv2d, self).__init__()
+
+        self.h = MaskedConv2d(mask_type, *args, **kwargs)
+        self.g = MaskedConv2d(mask_type, *args, **kwargs)
+
+    def forward(self, x):
+        h = self.h(x)
+        g = nn.Sigmoid()(self.g(x))
+        return h * g
+
+
 class MaskedConv2d(nn.Conv2d):
     ''' from jmtomczak's github '''
     def __init__(self, mask_type, *args, **kwargs):
@@ -744,31 +782,33 @@ def build_relational_conv_encoder(input_shape, filter_depth=32,
 
 
 
-def build_pixelcnn_decoder(input_size, output_shape, filter_depth=32,
-                           activation_fn=nn.ELU, normalization_str="none", **kwargs):
+def build_pixelcnn_decoder(input_size, output_shape, filter_depth=64,
+                           activation_fn=nn.ReLU, normalization_str="none",
+                           nr_logistic_mix=10, **kwargs):
     ''' modified from jmtomczak's github, do not use, use submodule pixelcnn '''
-    bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
-    warnings.warn("use pixelcnn from helpers submodule instead, this is not tested")
+    #warnings.warn("use pixelcnn from helpers submodule instead, this is not tested")
     chans = output_shape[0]
-    act = nn.SELU(True)  # nn.ReLU(True)
+    num_mix = 3 if chans == 1 else 10
+
     return nn.Sequential(
-        add_normalization(MaskedConv2d('A', input_size, 64, 3, 1, 1, bias=False),
-                          normalization_str, 2, 64, num_groups=32), act,
-        add_normalization(MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False),
-                          normalization_str, 2, 64, num_groups=32), act,
-        add_normalization(MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False),
-                          normalization_str, 2, 64, num_groups=32), act,
-        add_normalization(MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False),
-                          normalization_str, 2, 64, num_groups=32), act,
-        add_normalization(MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False),
-                          normalization_str, 2, 64, num_groups=32), act,
-        add_normalization(MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False),
-                          normalization_str, 2, 64, num_groups=32), act,
-        add_normalization(MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False),
-                          normalization_str, 2, 64, num_groups=32), act,
-        add_normalization(MaskedConv2d('B', 64, 64, 3, 1, 1, bias=False),
-                          normalization_str, 2, 64, num_groups=32), act,
-        nn.Conv2d(64, chans, 1, 1, 0, dilation=1, bias=True)
+        add_normalization(MaskedConv2d('A', input_size, filter_depth, 3, 1, 1, bias=False),
+                          normalization_str, 2, filter_depth, num_groups=32), activation_fn(),
+        add_normalization(MaskedConv2d('B', filter_depth, filter_depth, 3, 1, 1, bias=False),
+                          normalization_str, 2, filter_depth, num_groups=32), activation_fn(),
+        add_normalization(MaskedConv2d('B', filter_depth, filter_depth, 3, 1, 1, bias=False),
+                          normalization_str, 2, filter_depth, num_groups=32), activation_fn(),
+        add_normalization(MaskedConv2d('B', filter_depth, filter_depth, 3, 1, 1, bias=False),
+                          normalization_str, 2, filter_depth, num_groups=32), activation_fn(),
+        add_normalization(MaskedConv2d('B', filter_depth, filter_depth, 3, 1, 1, bias=False),
+                          normalization_str, 2, filter_depth, num_groups=32), activation_fn(),
+        add_normalization(MaskedConv2d('B', filter_depth, filter_depth, 3, 1, 1, bias=False),
+                          normalization_str, 2, filter_depth, num_groups=32), activation_fn(),
+        add_normalization(MaskedConv2d('B', filter_depth, filter_depth, 3, 1, 1, bias=False),
+                          normalization_str, 2, filter_depth, num_groups=32), activation_fn(),
+        add_normalization(MaskedConv2d('B', filter_depth, filter_depth, 3, 1, 1, bias=False),
+                          normalization_str, 2, filter_depth, num_groups=32), activation_fn(),
+        #nn.Conv2d(filter_depth, num_mix * nr_logistic_mix, 1, 1, 0, dilation=1, bias=True)
+        nn.Conv2d(filter_depth, num_mix * nr_logistic_mix, 1)
     )
 
 
