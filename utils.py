@@ -10,6 +10,7 @@ import contextlib
 import torch.nn.functional as F
 import torch.distributions as D
 
+from collections import Counter
 from copy import deepcopy
 from torch.autograd import Variable
 
