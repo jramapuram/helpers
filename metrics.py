@@ -230,7 +230,7 @@ def calculate_consistency(model, loader, reparam_type, vae_type, cuda=False):
 
                 correct = to_data(teacher_posterior).max(1)[1] \
                           == to_data(student_posterior).max(1)[1]
-                consistency.append(torch.mean(correct.type(float_type(cuda))))
+                consistency.append(torch.mean(correct.type(float_type(cuda))).item())
                 # print("teacher = ", teacher_posterior)
                 # print("student = ", student_posterior)
                 # print("consistency[-1]=", correct)
