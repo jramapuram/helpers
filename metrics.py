@@ -117,7 +117,7 @@ def calculate_fid(fid_model, model, loader, grapher,
                                               num_samples=num_samples,
                                               cuda=cuda)
     if grapher:
-        grapher.add_text('FID', str(fid), 0, append=True)
+        grapher.add_text('FID', str(fid), 0)
 
     return fid
 
@@ -144,7 +144,7 @@ def calculate_fid_from_generated_images(fid_model, model, data_loader,
                 "FID batch {} <= loader batch {}".format(fid_model.batch_size, batch_size)
             for begin, end in zip(range(0, batch_size, fid_model.batch_size),
                                   range(fid_model.batch_size, batch_size+1, fid_model.batch_size)):
-                generated = model.generate_synthetic_samples(batch_size)
+                generated = model.generate_synthetic_samples(batch_size=batch_size)
                 _, test_features = fid_model(data[begin:end])
                 _, generated_features = fid_model(generated[begin:end])
                 test_features = test_features.view(fid_model.batch_size, -1)

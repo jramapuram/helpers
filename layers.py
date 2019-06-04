@@ -587,7 +587,7 @@ class ResnetBlock(nn.Module):
                  activation_fn=nn.ReLU, **kwargs):
         super(ResnetBlock, self).__init__()
         layer_type = kwargs['layer_type'] if 'layer_type' in kwargs else ResnetBlock.conv3x3
-        self.gn_planes = int(min(np.ceil(planes / 2), 32))
+        self.gn_planes = max(int(min(np.ceil(planes / 2), 32)), 1)
         self.conv1 = add_normalization(layer_type(inplanes, planes, stride),
                                        normalization_str, 2, planes, num_groups=self.gn_planes)
         #self.act = str_to_activ(activation_str)
@@ -637,7 +637,7 @@ class ResnetDeconvBlock(nn.Module):
                  normalization_str="groupnorm", activation_fn=nn.ReLU, **kwargs):
         super(ResnetDeconvBlock, self).__init__()
         layer_type = kwargs['layer_type'] if 'layer_type' in kwargs else ResnetDeconvBlock.deconv3x3
-        self.gn_planes = int(min(np.ceil(planes / 2), 32))
+        self.gn_planes = max(int(min(np.ceil(planes / 2), 32)), 1)
         self.conv1 = add_normalization(layer_type(inplanes, planes, stride),
                                        normalization_str, 2, planes, num_groups=self.gn_planes)
         #self.act = str_to_activ(activation_str)
@@ -660,8 +660,9 @@ class ResnetDeconvBlock(nn.Module):
     @staticmethod
     def gated_deconv3x3(in_planes, out_planes, stride=1):
         """3x3 convolution with padding"""
-        return GatedConvTranspose2d(in_planes, out_planes, kernel_size=3, stride=stride,
-                                    padding=0, bias=False)
+        layer_type = functools.partial(GatedConv2d, layer_type=nn.ConvTranspose2d)
+        return layer_type(in_planes, out_planes, kernel_size=3, stride=stride,
+                          padding=0, bias=False)
 
     def upsample(self, x, output_shape, mode='bilinear'):
         upsampled = self.upsampler(x)

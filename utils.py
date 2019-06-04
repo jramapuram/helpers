@@ -530,7 +530,7 @@ def get_name(args):
 
     vargs = deepcopy(vars(args))
     blacklist_keys = ['visdom_url', 'visdom_port', 'data_dir', 'download', 'cuda', 'uid',
-                      'debug_step', 'model_dir', 'calculate_fid_with', 'input_shape']
+                      'debug_step', 'model_dir', 'calculate_fid_with', 'input_shape', 'fid_model_dir']
     filtered = {k:v for k,v in vargs.items() if k not in blacklist_keys} # remove useless info
 
     def _factor(name):
@@ -562,7 +562,8 @@ def get_name(args):
 
     # now filter into the final filter map and return
     bool2int = lambda v: int(v) if isinstance(v, bool) else v
-    filtered = {_factor(k):bool2int(v) for k,v in filtered.items()}
+    none2bool = lambda v: 0 if v is None else 1
+    filtered = {_factor(k):none2bool(bool2int(v)) for k,v in filtered.items()}
     return _clean_task_str("{}_{}".format(
         args.uid + "_" if args.uid else "",
         "_".join(["{}{}".format(k, v) for k, v in filtered.items()])
@@ -570,6 +571,10 @@ def get_name(args):
                            .replace('disc_mix_logistic', 'dml')
                            .replace('pixelcnn', 'pcnn')
                            .replace('isotropic_gaussian', 'ig')
+                           .replace('bernoulli', 'bern')
+                           .replace('mixture', 'mix')
+                           .replace('parallel', 'par')
+                           # .replace('coordconv', 'cconv')
     )
 
 
