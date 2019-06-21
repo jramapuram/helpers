@@ -17,6 +17,18 @@ def nll_activation(logits, nll_type, **kwargs):
         # ideally do this, but needs parameterization
         # return fn(logits, **kwargs)
         return fn(logits, nr_mix=10)
+    elif nll_type == 'log_logistic_256':
+        assert len(logits.shape) == 4, "need 4-dim tensor for log-logistic-256"
+        assert 'chans' in kwargs, "need channels for disc_mix_logistic"
+
+        if kwargs['chans'] == 1:
+            return torch.bernoulli(logits)
+        else:
+            num_half_chans = logits.size(1) // 2
+            logits_mu = logits[:, 0:num_half_chans, :, :]
+            # logits_sigma = logits[:, num_half_chans:, :, :]
+            #return torch.bernoulli(F.sigmoid(logits_mu))
+            return torch.sigmoid(logits_mu)
     elif nll_type == "gaussian":
         # num_half_chans = logits.size(1) // 2
         # logits_mu = logits[:, 0:num_half_chans, :, :]
@@ -47,6 +59,7 @@ def nll(x, recon_x, nll_type):
         "gaussian": nll_gaussian,
         "bernoulli": nll_bernoulli,
         "laplace": nll_laplace,
+        "log_logistic_256": nll_log_logistic_256,
         "disc_mix_logistic": nll_disc_mix_logistic
     }
     return nll_map[nll_type](x, recon_x.contiguous())
@@ -60,22 +73,30 @@ def nll_bernoulli(x, recon_x_logits, half=False):
     return -torch.sum(nll, dim=-1)
 
 
-def log_logistic_256(x, recon_x_logits, half=False):
-    ''' from jmtomczak's github '''
+def nll_log_logistic_256(x, recon_x_logits, half=False):
+    ''' modified from jmtomczak's github '''
+    batch_size = x.shape[0]
     bin_size = 1. / 256.
+    assert recon_x_logits.shape[1] % 2 == 0, "need variance for reconstruction"
     half_chans = recon_x_logits.size(1) // 2
-    mean = torch.clamp(F.sigmoid(recon_x_logits[:, 0:half_chans, :, :]), min=0.+1./512., max=1.-1./512.)
-    logvar = F.hardtanh(recon_x_logits[:, half_chans:, :, :], min_val=-4.5, max_val=0.)
+    mean = torch.clamp(
+        torch.sigmoid(recon_x_logits[:, 0:half_chans, :, :].view(batch_size, -1)),
+        min=0.+1./512., max=1.-1./512.
+    )
+    logvar = F.hardtanh(
+        recon_x_logits[:, half_chans:, :, :].view(batch_size, -1),
+        min_val=-4.5, max_val=0.
+    )
 
     # implementation like https://github.com/openai/iaf/blob/master/tf_utils/distributions.py#L28
     scale = torch.exp(logvar)
-    x = (torch.floor(x / bin_size) * bin_size - mean) / scale
-    cdf_plus = torch.sigmoid(x + bin_size/scale)
-    cdf_minus = torch.sigmoid(x)
+    x_scaled = (torch.floor(x.view(batch_size, -1) / bin_size) * bin_size - mean) / scale
+    cdf_plus = torch.sigmoid(x_scaled + bin_size/scale)
+    cdf_minus = torch.sigmoid(x_scaled)
 
     # calculate final log-likelihood for an image
     log_logist_256 = -torch.log(cdf_plus - cdf_minus + 1.e-7)
-    return -torch.sum(log_logist_256, dim=-1)
+    return torch.sum(log_logist_256, dim=-1)
 
 
 def nll_disc_mix_logistic(x, recon, half=False):
