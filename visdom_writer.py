@@ -21,7 +21,7 @@ class VisdomWriter:
         self.scalar_dict = {}
         self.server_connected = False
         log_filename = os.path.join(log_folder, env + ".log") if log_folder is not None else None
-        if not os.path.isdir(log_folder):
+        if log_folder is not None and not os.path.isdir(log_folder):
             os.makedirs(log_folder)
 
         self.vis = Visdom(server=server, port=port, env=env,

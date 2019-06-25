@@ -589,6 +589,7 @@ def get_name(args):
                            .replace('kaiming_normal', 'kn')
                            .replace('softplus', 'sp')
                            .replace('softmax', 'sm')
+                           .replace('identity', 'i')
                            .replace('zeros', 'z')
                            .replace('normal', 'n')
                            .replace('uniform', 'u')
