@@ -888,21 +888,25 @@ def build_conv_encoder(input_shape, output_size, filter_depth=32,
                                num_layers=num_layers, normalization_str=normalization_str, **kwargs)
 
 
-def build_resnet_encoder(input_shape, output_size, filter_depth=32,
-                         activation_fn=nn.SELU, num_layers=None,
-                         normalization_str="none", **kwargs):
-    warnings.warn("DEPRICATED: resnet encoder does not currently use num_layers")
+def build_volume_preserving_resnet(input_shape, filter_depth=32,
+                                   activation_fn=nn.SELU, num_layers=4,
+                                   normalization_str="none", **kwargs):
+    assert num_layers % 2 == 0, "need even layers for upscale --> downscale"
     chans = input_shape[0]
-    bilinear_size = kwargs['bilinear_size'] if 'bilinear_size' in kwargs else (64, 64)
+    def _make_layer(inchan, outchan, stride):
+        return ResnetBlock(inchan, outchan, stride=1,
+                           normalization_str=normalization_str,
+                           activation_fn=activation_fn,
+                           downsample=True,
+                           **kwargs)
+
+    normalization_override = 'none' if normalization_str == 'groupnorm' else normalization_str
     return nn.Sequential(
-        nn.Upsample(size=bilinear_size, mode='bilinear', align_corners=True),
-        ResnetBlock(chans, filter_depth, stride=2, normalization_str=normalization_str, downsample=True, activation_fn=activation_fn, **kwargs),
-        ResnetBlock(filter_depth, filter_depth*2, stride=2, normalization_str=normalization_str, downsample=True, activation_fn=activation_fn, **kwargs),
-        ResnetBlock(filter_depth*2, filter_depth*4, stride=2, normalization_str=normalization_str, downsample=True, activation_fn=activation_fn, **kwargs),
-        ResnetBlock(filter_depth*4, filter_depth*2, stride=2, normalization_str=normalization_str, downsample=True, activation_fn=activation_fn, **kwargs),
-        ResnetBlock(filter_depth*2, filter_depth, stride=2, normalization_str=normalization_str, downsample=True, activation_fn=activation_fn, **kwargs),
-        ResnetBlock(filter_depth, output_size, stride=2, normalization_str=normalization_str, downsample=True, activation_fn=activation_fn, **kwargs),
-        nn.Conv2d(output_size, output_size, kernel_size=1, stride=1),
+        ResnetBlock(chans, filter_depth, stride=1, normalization_str=normalization_override, downsample=True, activation_fn=activation_fn, **kwargs),
+        *[_make_layer(filter_depth*(2**i), filter_depth*(2**(i+1)), stride=1) for i in range(num_layers//2)],
+        *[_make_layer(filter_depth*(2**(i+1)), filter_depth*(2**i), stride=1) for i in range(num_layers//2 - 1, -1, -1)],
+        ResnetBlock(filter_depth, chans, stride=1, normalization_str=normalization_override, downsample=True, activation_fn=activation_fn, **kwargs),
+        #nn.Conv2d(chans, chans, kernel_size=1, stride=1),
         Squeeze()
     )
 
