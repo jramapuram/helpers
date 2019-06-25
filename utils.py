@@ -562,21 +562,38 @@ def get_name(args):
 
     # now filter into the final filter map and return
     bool2int = lambda v: int(v) if isinstance(v, bool) else v
-    none2bool = lambda v: 0 if v is None else 1
-    filtered = {_factor(k):none2bool(bool2int(v)) for k,v in filtered.items()}
+    none2bool = lambda v: 0 if v is None else v
+    nonestr2bool = lambda v: 0 if isinstance(v, str) and v.lower().strip() == 'none' else v
+    clip2int = lambda v: int(v) if isinstance(v, (float, np.float32, np.float64)) and v == 0.0 else v
+    filtered = {_factor(k):clip2int(nonestr2bool(none2bool(bool2int(v)))) for k,v in filtered.items()}
     return _clean_task_str("{}_{}".format(
         args.uid + "_" if args.uid else "",
         "_".join(["{}{}".format(k, v) for k, v in filtered.items()])
     ).replace('batchnorm', 'bn').replace('groupnorm', 'gn')
+                           .replace('instancenorm', 'in')
+                           .replace('weightnorm', 'wn')
                            .replace('disc_mix_logistic', 'dml')
+                           .replace('log_logistic_256', 'll256')
                            .replace('pixelcnn', 'pcnn')
                            .replace('isotropic_gaussian', 'ig')
                            .replace('bernoulli', 'bern')
                            .replace('mixture', 'mix')
                            .replace('parallel', 'par')
-                           # .replace('coordconv', 'cconv')
+                           .replace('coordconv', 'cc')
+                           .replace('dense', 'd')
+                           .replace('conv', 'c')
+                           .replace('resnet', 'r')
+                           .replace('softplus', 'sp')
+                           .replace('softmax', 'sm')
+                           .replace('zeros', 'z')
+                           .replace('normal', 'n')
+                           .replace('xavier_normal', 'xn')
+                           .replace('xavier_uniform', 'xu')
+                           .replace('uniform', 'u')
+                           .replace('orthogonal', 'o')
+                           .replace('kaiming_uniform', 'kl')
+                           .replace('kaiming_normal', 'kn')
     )
-
 
 
 def register_nan_checks(model):
