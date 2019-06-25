@@ -11,7 +11,7 @@ from tensorboardX.x2num import make_np
 
 
 class VisdomWriter:
-    def __init__(self, env, server, port=8097, use_incoming_socket=False, raise_exceptions=False):
+    def __init__(self, env, server, port=8097, log_folder=None, use_incoming_socket=False, raise_exceptions=False):
         try:
             from visdom import Visdom
         except ImportError:
@@ -20,11 +20,12 @@ class VisdomWriter:
         self.env = env
         self.scalar_dict = {}
         self.server_connected = False
-        if not os.path.isdir('runs'):
-            os.makedirs('runs')
+        log_filename = os.path.join(log_folder, env + ".log") if log_folder is not None else None
+        if not os.path.isdir(log_folder):
+            os.makedirs(log_folder)
 
         self.vis = Visdom(server=server, port=port, env=env,
-                          log_to_filename=os.path.join('runs', env + ".log"),
+                          log_to_filename=log_filename,
                           use_incoming_socket=use_incoming_socket,
                           raise_exceptions=raise_exceptions)
         self.windows = {}
