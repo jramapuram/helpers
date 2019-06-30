@@ -46,6 +46,7 @@ def nll_has_variance(nll_str):
         'gaussian': True,
         'laplace': True,
         'bernoulli': False,
+        'log_logistic_256': True,
         'disc_mix_logistic': True
     }
 

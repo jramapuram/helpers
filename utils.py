@@ -530,7 +530,8 @@ def get_name(args):
 
     vargs = deepcopy(vars(args))
     blacklist_keys = ['visdom_url', 'visdom_port', 'data_dir', 'download', 'cuda', 'uid',
-                      'debug_step', 'model_dir', 'calculate_fid_with', 'input_shape', 'fid_model_dir']
+                      'debug_step', 'detect_anomalies', 'model_dir', 'calculate_fid_with',
+                      'input_shape', 'fid_model_dir']
     filtered = {k:v for k,v in vargs.items() if k not in blacklist_keys} # remove useless info
 
     def _factor(name):
