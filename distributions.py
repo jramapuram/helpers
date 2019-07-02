@@ -22,7 +22,7 @@ def nll_activation(logits, nll_type, **kwargs):
         assert 'chans' in kwargs, "need channels for disc_mix_logistic"
 
         if kwargs['chans'] == 1:
-            return torch.bernoulli(logits)
+            return torch.sigmoid(logits)
         else:
             num_half_chans = logits.size(1) // 2
             logits_mu = logits[:, 0:num_half_chans, :, :]
