@@ -85,7 +85,7 @@ def nll(x, recon_x, nll_type):
         "log_logistic_256": nll_log_logistic_256,
         "disc_mix_logistic": nll_disc_mix_logistic
     }
-    return nll_map[nll_type](x, recon_x.contiguous())
+    return nll_map[nll_type](x.contiguous(), recon_x.contiguous())
 
 
 def nll_bernoulli(x, recon_x_logits):
@@ -119,11 +119,11 @@ def nll_log_logistic_256(x, recon_x_logits):
     assert recon_x_logits.shape[1] % 2 == 0, "need variance for reconstruction"
     half_chans = recon_x_logits.size(1) // 2
     mean = torch.clamp(
-        torch.sigmoid(recon_x_logits[:, 0:half_chans, :, :].view(batch_size, -1)),
+        torch.sigmoid(recon_x_logits[:, 0:half_chans, :, :].contiguous().view(batch_size, -1)),
         min=0.+1./512., max=1.-1./512.
     )
     logvar = F.hardtanh(
-        recon_x_logits[:, half_chans:, :, :].view(batch_size, -1),
+        recon_x_logits[:, half_chans:, :, :].contiguous().view(batch_size, -1),
         min_val=-4.5, max_val=0.
     )
 

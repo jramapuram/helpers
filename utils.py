@@ -573,6 +573,7 @@ def get_name(args):
     ).replace('batchnorm', 'bn').replace('groupnorm', 'gn')
                            .replace('instancenorm', 'in')
                            .replace('weightnorm', 'wn')
+                           .replace('binarized_mnist', 'bmnist')
                            .replace('disc_mix_logistic', 'dml')
                            .replace('log_logistic_256', 'll256')
                            .replace('pixelcnn', 'pcnn')
