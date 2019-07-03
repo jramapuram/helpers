@@ -1289,7 +1289,7 @@ def get_encoder(config, name='encoder'):
 
 def get_decoder(config, reupsample=True, name='decoder'):
     ''' helper to return the correct decoder function'''
-    num_layers, _ = _get_num_layers(config['encoder_layer_type'], config['input_shape'], is_encoder=False)
+    num_layers, _ = _get_num_layers(config['decoder_layer_type'], config['input_shape'], is_encoder=False)
     net_map = {
         'resnet': {
             # True for gated, False for non-gated
