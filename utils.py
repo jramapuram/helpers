@@ -406,6 +406,22 @@ def pad(tensor_or_var, num_pad, value=0, prepend=False, dim=-1):
 def int_type(use_cuda):
     return torch.cuda.IntTensor if use_cuda else torch.IntTensor
 
+def get_aws_instance_id(timeout=2):
+    """ Returns the AWS instance id or None
+
+    :param timeout: seconds to timeout
+    :returns: None or str id
+    :rtype: str
+
+    """
+    # curl --connect-timeout 2 http://169.254.169.254/latest/meta-data/instance-id
+    import requests
+    try:
+        r = requests.get('http://169.254.169.254/latest/meta-data/instance-id', timeout=2)
+    except:
+        return None
+
+    return r.text
 
 def long_type(use_cuda):
     return torch.cuda.LongTensor if use_cuda else torch.LongTensor
