@@ -10,6 +10,7 @@ import contextlib
 import torch.nn.functional as F
 import torch.distributions as D
 
+from itertools import chain
 from collections import Counter
 from copy import deepcopy
 from torch.autograd import Variable
@@ -20,6 +21,16 @@ def dummy_context():
     ''' for conditional with statements'''
     yield None
 
+
+def flatten(input_list):
+    """ Flatten a list of lists
+
+    :param input_list: the input list-of-lists
+    :returns: flattened single list
+    :rtype: list
+
+    """
+    return list(chain.from_iterable(input_list))
 
 def pca_reduce(x, num_reduce):
     '''reduced matrix X to num_reduce features'''
@@ -567,13 +578,15 @@ def get_name(args):
     nonestr2bool = lambda v: 0 if isinstance(v, str) and v.lower().strip() == 'none' else v
     clip2int = lambda v: int(v) if isinstance(v, (float, np.float32, np.float64)) and v == 0.0 else v
     filtered = {_factor(k):clip2int(nonestr2bool(none2bool(bool2int(v)))) for k,v in filtered.items()}
-    return _clean_task_str("{}_{}".format(
+    name = _clean_task_str("{}_{}".format(
         args.uid + "_" if args.uid else "",
         "_".join(["{}{}".format(k, v) for k, v in filtered.items()])
     ).replace('batchnorm', 'bn').replace('groupnorm', 'gn')
                            .replace('instancenorm', 'in')
                            .replace('weightnorm', 'wn')
                            .replace('binarized_mnist', 'bmnist')
+                           .replace('binarized_omniglot', 'boglot')
+                           .replace('omniglot', 'oglot')
                            .replace('disc_mix_logistic', 'dml')
                            .replace('log_logistic_256', 'll256')
                            .replace('pixelcnn', 'pcnn')
@@ -597,6 +610,10 @@ def get_name(args):
                            .replace('uniform', 'u')
                            .replace('orthogonal', 'o')
     )
+
+    # sanity check to ensure filename is 255 chars or less for being able to write to filesystem
+    assert len(name) + len('.json') < np.power(2, 8), "rethink argparse to shorten name"
+    return name
 
 
 def register_nan_checks(model):
