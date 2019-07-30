@@ -417,6 +417,20 @@ def pad(tensor_or_var, num_pad, value=0, prepend=False, dim=-1):
 def int_type(use_cuda):
     return torch.cuda.IntTensor if use_cuda else torch.IntTensor
 
+def hash_to_size(text, size=-1):
+    """ Get a hashed value for the provided text upto size
+
+    :param text: string text
+    :param size: number to truncate upto (default: don't truncate)
+    :returns: text hashed
+    :rtype: str
+
+    """
+    import hashlib
+    hash_object = hashlib.sha1(str.encode(text))
+    hex_dig = hash_object.hexdigest()
+    return hex_dig[0:size]
+
 def get_aws_instance_id(timeout=2):
     """ Returns the AWS instance id or None
 
@@ -432,7 +446,7 @@ def get_aws_instance_id(timeout=2):
     except:
         return None
 
-    return r.text
+    return hash_to_size(r.text, 4)
 
 def long_type(use_cuda):
     return torch.cuda.LongTensor if use_cuda else torch.LongTensor
@@ -592,10 +606,11 @@ def get_name(args):
     bool2int = lambda v: int(v) if isinstance(v, bool) else v
     none2bool = lambda v: 0 if v is None else v
     nonestr2bool = lambda v: 0 if isinstance(v, str) and v.lower().strip() == 'none' else v
-    clip2int = lambda v: int(v) if isinstance(v, (float, np.float32, np.float64)) and v == 0.0 else v
+    # clip2int = lambda v: int(v) if isinstance(v, (float, np.float32, np.float64)) and v == 0.0 else v
+    clip2int = lambda v: int(v) if isinstance(v, float) and v - int(v) == 0 else v
     filtered = {_factor(k):clip2int(nonestr2bool(none2bool(bool2int(v)))) for k,v in filtered.items()}
     name = _clean_task_str("{}_{}".format(
-        args.uid + "_" if args.uid else "",
+        args.uid if args.uid else "",
         "_".join(["{}{}".format(k, v) for k, v in filtered.items()])
     ).replace('batchnorm', 'bn').replace('groupnorm', 'gn')
                            .replace('instancenorm', 'in')
@@ -628,7 +643,7 @@ def get_name(args):
     )
 
     # sanity check to ensure filename is 255 chars or less for being able to write to filesystem
-    assert len(name) + len('.json') < np.power(2, 8), "rethink argparse to shorten name"
+    assert len(name) + len('.json') < np.power(2, 8), "rethink argparse to shorten name: {}".format(name)
     return name
 
 
