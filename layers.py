@@ -580,6 +580,82 @@ class UpsampleConvLayer(torch.nn.Module):
         out = self.conv2d(out)
         return out
 
+class Annealer(nn.Module):
+    def __init__(self, initial_temp=10, min_temp=1e-6, anneal_rate=3e-6, interval=10, use_hard=False):
+        """ A simple module that anneals a temperature.
+
+        :param initial_temp: the initial starting temperature
+        :param min_temp: the min temp to go to
+        :param anneal_rate: the rate of decay
+        :param interval: every i-th minibatch to anneal
+        :param use_hard: hard decay or smooth exponential decay
+        :returns: Annealer object
+        :rtype: nn.Module
+
+        """
+        super(Annealer, self).__init__()
+        self.tau, self.tau0 = initial_temp, initial_temp
+        self.anneal_rate = anneal_rate
+        self.min_temp = min_temp
+        self.anneal_interval = interval
+        self.use_hard = use_hard
+        self.iteration = 0
+
+    def forward(self):
+        """ Returns the current temperature
+
+        :returns: float temp
+        :rtype: float
+
+        """
+        if self.training \
+           and self.iteration > 0 \
+           and self.iteration % self.anneal_interval == 0:
+
+            if not self.use_hard:
+                # smoother annealing
+                rate = -self.anneal_rate * self.iteration
+                self.tau = np.maximum(self.tau0 * np.exp(rate), self.min_temp)
+                if self.tau < 1e-4:
+                    self.tau = self.min_temp
+            else:
+                # hard annealing
+                self.tau = np.maximum(0.9 * self.tau, self.min_temp)
+
+        self.iteration += 1
+        return float(self.tau)
+
+class DenseResnet(nn.Module):
+    def __init__(self, input_size, output_size, normalization_str="none", activation_fn=nn.ReLU):
+        """ Resnet, but with dense layers
+
+        :param input_size: the input size
+        :param output_size: output size
+        :param normalization_str: what type of normalization to use
+        :param activation_fn: the activation function module
+        :returns: DenseResnet object
+        :rtype: nn.Module
+
+        """
+        super(DenseResnet, self).__init__()
+        self.dense1 = add_normalization(nn.Linear(input_size, output_size), normalization_str, 1, output_size)
+        self.dense2 = add_normalization(nn.Linear(output_size, output_size), normalization_str, 1, output_size)
+        self.downsampler = add_normalization(nn.Linear(input_size, output_size),
+                                             normalization_str, 1, output_size)
+        self.act = activation_fn()
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+        out = self.dense1(x.view(batch_size, -1))
+        out = self.act(out)
+        out = self.dense2(out)
+
+        # add residual part and return
+        residual = self.downsampler(x)
+        out += residual
+        return self.act(out)
+
+
 
 class ResnetBlock(nn.Module):
     def __init__(self, inplanes, planes, stride=1, downsample=None,
@@ -838,6 +914,11 @@ def add_normalization(module, normalization_str, ndims, nfeatures, **kwargs):
             2: lambda nfeatures, **kwargs: nn.utils.weight_norm(module),
             3: lambda nfeatures, **kwargs: nn.utils.weight_norm(module)
         },
+        'spectralnorm': {
+            1: lambda nfeatures, **kwargs: nn.utils.spectral_norm(module),
+            2: lambda nfeatures, **kwargs: nn.utils.spectral_norm(module),
+            3: lambda nfeatures, **kwargs: nn.utils.spectral_norm(module)
+        },
         'none': {
             1: lambda nfeatures, **kwargs: Identity(),
             2: lambda nfeatures, **kwargs: Identity(),
@@ -849,7 +930,7 @@ def add_normalization(module, normalization_str, ndims, nfeatures, **kwargs):
         assert 'num_groups' in kwargs, "need to specify groups for GN"
         assert ndims > 1, "group norm needs channels to operate"
 
-    if normalization_str == 'weightnorm':
+    if normalization_str == 'weightnorm' or normalization_str == 'spectralnorm':
         return norm_map[normalization_str][ndims](nfeatures, **kwargs)
 
     return nn.Sequential(module, norm_map[normalization_str][ndims](nfeatures, **kwargs))
