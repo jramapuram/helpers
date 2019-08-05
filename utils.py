@@ -558,6 +558,28 @@ def all_zero_check_and_break(tensor, name=""):
         exit(-1)
 
 
+def reduce(tensor, dim=None, reduction='sum'):
+    """ Helper to reduce a tensor over dim using reduction style.
+        Choices are sum, mean or none.
+
+    :param tensor: the tensor to reduce
+    :param dim: the dimension to reduce, if None do full reduction
+    :param reduction: type of reduction
+    :returns: reduced tensor
+    :rtype: torch.Tensor or primitive type
+
+    """
+    reduction_map = {
+        'sum': torch.sum,
+        'mean': torch.mean,
+        'none': lambda x, dim=None: x
+    }
+    if dim is None:
+        return reduction_map[reduction](tensor)
+
+    return reduction_map[reduction](tensor, dim=dim)
+
+
 def get_name(args):
     """Takes the argparse and returns kv_kv1_...
         Note that k is refactored as: 'conv_normalization' --> 'cn'
