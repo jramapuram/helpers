@@ -261,6 +261,110 @@ class CoordConvTranspose(nn.Module):
         return self.conv_tr_layer(x)
 
 
+class BatchGroupNorm(nn.Module):
+    def __init__(self, num_groups, num_features):
+        """ Batch version of groupnorm, flattens everything to batch and then operates over channels like usual.
+
+        :param num_groups: number of groups to use with batch groupnorm
+        :param num_features: number of features in batch groupnorm
+        :returns: groupnormed tensor
+        :rtype: torch.Tensor
+
+        """
+        super(BatchGroupNorm, self).__init__()
+        self.gn = nn.GroupNorm(num_groups, num_features)
+
+    def forward(self, x):
+        assert len(x.shape) == 5, "batchGroupNorm expects a 5d [{}] tensor".format(x.shape)
+        b_i, b_j, c, h, w = x.shape
+        out = self.gn(x.contiguous().view(b_i * b_j, c, h, w))
+        return out.view([b_i, b_j] + list(out.shape[1:]))
+
+
+class BatchConv2D(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size,
+                 stride=1, padding=0, dilation=1, groups=1, bias=True):
+        """ Batch convolve a set of inputs by groups in parallel. Similar to bmm.
+
+        :param in_channels: (b_j, b_i, c_in, h, w) where b_j are the parallel convs to run
+        :param out_channels: output channels from conv
+        :param kernel_size: size of conv kernel
+        :param stride: the stride of the filter
+        :param padding: the padding around the input
+        :param dilation: the filter dilation
+        :param groups: number of parallel ops
+        :param bias: whether of not to include a bias term in the conv (bool)
+        :returns: tensor of (b_j, b_i, c_out, kh, kw) with batch convolve done
+        :rtype: torch.Tensor
+
+        """
+        super(BatchConv2D, self).__init__()
+        self.out_channels = out_channels
+        self.conv = nn.Conv2d(in_channels*groups, out_channels*groups,
+                              kernel_size, stride=stride,
+                              padding=padding, dilation=dilation,
+                              groups=groups, bias=bias)
+
+    def forward(self, x):
+        """ (b_j, b_i, c_in, h, w) -> (b_j, b_i * c_in, h, w) --> (b_j, b_i, c_out, h, w)
+
+        :param x: accepts an input of (b_j, b_i, c_in, h, w) where b_j are the parallel groups
+        :returns: (b_j, b_i , c_out, kh, kh, kw)
+        :rtype: torch.Tensor
+
+        """
+        assert len(x.shape) == 5, "batchconv2d expects a 5d [{}] tensor".format(x.shape)
+        b_i, b_j, c, h, w = x.shape
+        out = self.conv(x.permute([1, 0, 2, 3, 4]).contiguous().view(b_j, b_i * c, h, w))
+        return out.view(b_j, b_i, self.out_channels,
+                        out.shape[-2], out.shape[-1]).permute([1, 0, 2, 3, 4])
+
+
+class BatchConvTranspose2D(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size,
+                 stride=1, padding=0, output_padding=0, groups=1, bias=True,
+                 dilation=1):
+        """ Batch conv-transpose a set of inputs by groups in parallel. Similar to bmm.
+
+        :param in_channels: (b_j, b_i, c_in, h, w) where b_j are the parallel convs to run
+        :param out_channels: output channels from conv
+        :param kernel_size: size of conv kernel
+        :param stride: the stride of the filter
+        :param padding: the padding around the input
+        :param output_padding: the padding of the output volume
+        :param groups: number of parallel ops
+        :param bias: whether of not to include a bias term in the conv (bool)
+        :param dilation: the filter dilation
+        :returns: tensor of (b_j, b_i, c_out, kh, kw) with batch convolve done
+        :rtype: torch.Tensor
+
+        """
+        super(BatchConvTranspose2D, self).__init__()
+        self.out_channels = out_channels
+        self.conv = nn.ConvTranspose2d(in_channels*groups, out_channels*groups,
+                                       kernel_size, stride=stride,
+                                       padding=padding,
+                                       output_padding=output_padding,
+                                       groups=groups, bias=bias,
+                                       dilation=dilation)
+
+    def forward(self, x):
+        """ (b_j, b_i, c_in, h, w) -> (b_j, b_i * c_in, h, w) --> (b_j, b_i, c_out, h, w)
+
+        :param x: accepts an input of (b_j, b_i, c_in, h, w) where b_j are the parallel groups
+        :returns: (b_j, b_i , c_out, kh, kh, kw)
+        :rtype: torch.Tensor
+
+        """
+        assert len(x.shape) == 5, "batchconv2d expects a 5d [{}] tensor".format(x.shape)
+        b_i, b_j, c, h, w = x.shape
+        print("input to bct2d = ", x.shape)
+        out = self.conv(x.permute([1, 0, 2, 3, 4]).contiguous().view(b_j, b_i * c, h, w))
+        print("batchConv2dTransposeOutput = ", out.shape)
+        return out.view(b_j, b_i, self.out_channels,
+                        out.shape[-2], out.shape[-1]).permute([1, 0, 2, 3, 4])
+
+
 class MaskedResUnit(nn.Module):
     ''' from jmtomczak's github '''
     def __init__(self, mask_type, *args, **kwargs):
@@ -900,6 +1004,9 @@ def add_normalization(module, normalization_str, ndims, nfeatures, **kwargs):
         'groupnorm': {
             2: lambda nfeatures, **kwargs: nn.GroupNorm(kwargs['num_groups'], nfeatures)
         },
+        'batch_groupnorm': {
+            2: lambda nfeatures, **kwargs: BatchGroupNorm(kwargs['num_groups'], nfeatures)
+        },
         'instancenorm': {
             1: lambda nfeatures, **kwargs: nn.Sequential(
                 View([-1, 1, nfeatures]),
@@ -967,6 +1074,24 @@ def build_conv_encoder(input_shape, output_size, filter_depth=32,
     return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=nn.Conv2d,
                                filter_depth=filter_depth, activation_fn=activation_fn,
                                num_layers=num_layers, normalization_str=normalization_str, **kwargs)
+
+# batch versions
+def build_batch_gated_conv_encoder(input_shape, output_size, filter_depth=32,
+                                   activation_fn=Identity, num_layers=4,
+                                   normalization_str="none", **kwargs):
+    layer_type = functools.partial(GatedConv2d, layer_type=BatchConv2D)
+    return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=layer_type,
+                               filter_depth=filter_depth, activation_fn=activation_fn,
+                               num_layers=num_layers, normalization_str=normalization_str, **kwargs)
+
+
+def build_batch_conv_encoder(input_shape, output_size, filter_depth=32,
+                             activation_fn=nn.SELU, num_layers=4,
+                             normalization_str="none", **kwargs):
+    return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=BatchConv2D,
+                               filter_depth=filter_depth, activation_fn=activation_fn,
+                               num_layers=num_layers, normalization_str=normalization_str, **kwargs)
+
 
 
 def build_volume_preserving_resnet(input_shape, filter_depth=32,
@@ -1036,10 +1161,13 @@ def _build_conv_encoder(input_shape, output_size, layer_type=nn.Conv2d,
     upsampler = nn.Upsample(size=bilinear_size, mode='bilinear', align_corners=True)
     chans = input_shape[0]
 
+    # batch groups
+    groups = kwargs.get('groups', 1)
+
     def _make_layer(input_size, filter_depth, kernel_size=4, stride=1):
         gn_groups = max(int(min(np.ceil(filter_depth / 2), 32)), 1)
         return nn.Sequential(
-            add_normalization(layer_type(input_size, filter_depth, kernel_size, stride),
+            add_normalization(layer_type(input_size, filter_depth, kernel_size, stride, groups=groups),
                               normalization_str, 2, filter_depth, num_groups=gn_groups),
             activation_fn()
         )
@@ -1060,7 +1188,7 @@ def _build_conv_encoder(input_shape, output_size, layer_type=nn.Conv2d,
     return nn.Sequential(
         upsampler if list(input_shape[1:]) != list(bilinear_size) else Identity(),
         # input dim: num_channels x 32 x 32
-        add_normalization(layer_type(chans, filter_depth, 5, stride=1),
+        add_normalization(layer_type(chans, filter_depth, 5, stride=1, groups=groups),
                           normalization_str, 2, filter_depth, num_groups=num_init_groups),
         activation_fn(),
 
@@ -1068,12 +1196,12 @@ def _build_conv_encoder(input_shape, output_size, layer_type=nn.Conv2d,
         *intermediary_layers,
 
         # state dim: 512 x 1 x 1
-        add_normalization(layer_type(filter_depth*(2**num_layers), filter_depth*(2**num_layers), 1, stride=1 if bilinear_size[0]==32 else 3),
+        add_normalization(layer_type(filter_depth*(2**num_layers), filter_depth*(2**num_layers), 1, stride=1 if bilinear_size[0]==32 else 3, groups=groups),
                           normalization_str, 2, filter_depth*(2**num_layers), num_groups=num_final_groups),
         activation_fn(),
 
         # state dim: 512 x 1 x 1
-        layer_type(filter_depth*(2**num_layers), output_size, 1, stride=1),
+        layer_type(filter_depth*(2**num_layers), output_size, 1, stride=1, groups=groups),
 
         # output dim: opt.z_dim x 1 x 1
         Squeeze()
@@ -1105,10 +1233,15 @@ def _build_conv_decoder(input_size, output_shape, layer_type=nn.ConvTranspose2d,
                                                                                    strides)
     ]
 
+    # gn stats
     num_init_groups = max(int(min(np.ceil(filter_depth*(2**num_layers) / 2), 32)), 1)
     num_final_groups = max(int(min(np.ceil(filter_depth / 2), 32)), 1)
+
+    # a flattening / reshape layer
+    view_init_layer = Identity() if kwargs.get('disable_flatten', False) else  View([-1, input_size, 1, 1])
+
     return nn.Sequential(
-        View([-1, input_size, 1, 1]),
+        view_init_layer,
         # input dim: z_dim x 1 x 1
         add_normalization(layer_type(input_size, filter_depth*(2**num_layers), 4, stride=1, bias=True),
                           normalization_str, 2, filter_depth*(2**num_layers), num_groups=num_init_groups),
@@ -1214,6 +1347,26 @@ def build_conv_decoder(input_size, output_shape, filter_depth=32,
                                num_layers=num_layers, normalization_str=normalization_str,
                                reupsample=reupsample, layer_type=nn.ConvTranspose2d, **kwargs)
 
+# batch versions
+def build_batch_gated_conv_decoder(input_size, output_shape, filter_depth=32,
+                             activation_fn=Identity, num_layers=3,
+                             normalization_str="none", reupsample=True, **kwargs):
+    ''' helper that calls the builder function with GatedConvTranspose2d'''
+    layer_type = functools.partial(GatedConv2d, layer_type=BatchConvTranspose2D)
+    return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
+                               filter_depth=filter_depth, activation_fn=activation_fn,
+                               num_layers=num_layers, normalization_str=normalization_str,
+                               reupsample=reupsample, layer_type=layer_type, **kwargs)
+
+def build_batch_conv_decoder(input_size, output_shape, filter_depth=32,
+                             activation_fn=nn.SELU, num_layers=3, normalization_str='none',
+                             reupsample=True, **kwargs):
+    ''' helper that calls the builder function with nn.ConvTranspose2d'''
+    return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
+                               filter_depth=filter_depth, activation_fn=activation_fn,
+                               num_layers=num_layers, normalization_str=normalization_str,
+                               reupsample=reupsample, layer_type=BatchConvTranspose2D, **kwargs)
+
 
 def _build_dense(input_shape, output_shape, latent_size=512, num_layers=2,
                  activation_fn=nn.SELU, normalization_str="none",
@@ -1223,7 +1376,15 @@ def _build_dense(input_shape, output_shape, latent_size=512, num_layers=2,
     output_flat = int(np.prod(output_shape))
     output_shape = [output_shape] if not isinstance(output_shape, list) else output_shape
 
-    layers = [('view0', View([-1, input_flat])),
+    # don't flatten if we passed 'disable_flatten' in kwargs
+    if kwargs.get('disable_flatten', False) and input_flat == input_shape:
+        view_init_layer = Identity()
+        view_final_layer = Identity()
+    else:
+        view_init_layer = View([-1, input_flat])
+        view_final_layer = View([-1] + output_shape)
+
+    layers = [('view0', view_init_layer),
               ('l0', add_normalization(layer(input_flat, latent_size),
                                        normalization_str, 1, latent_size, num_groups=32)),
               ('act0', activation_fn())]
@@ -1236,7 +1397,7 @@ def _build_dense(input_shape, output_shape, latent_size=512, num_layers=2,
         layers.append(('act{}'.format(i+1), activation_fn()))
 
     layers.append(('output', layer(latent_size, output_flat)))
-    layers.append(('viewout', View([-1] + output_shape)))
+    layers.append(('viewout', view_final_layer))
 
     return nn.Sequential(OrderedDict(layers))
 
@@ -1281,6 +1442,7 @@ def _get_num_layers(layer_str, input_shape, is_encoder=True):
     input_size = min([256, 128, 64, 32], key=lambda x: abs(x - largest_image_dim))
     num_layer_encoder_dict = {
         'conv': {256: 9, 128: 7, 64: 5, 32: 4},
+        'batch_conv': {256: 9, 128: 7, 64: 5, 32: 4},
         'coordconv': {256: 9, 128: 7, 64: 5, 32: 4},
         'resnet': {256: 11, 128: 9, 64: 7, 32: 6},
         'dense': {256: 3, 128: 3, 64: 3, 32: 3},
@@ -1290,6 +1452,7 @@ def _get_num_layers(layer_str, input_shape, is_encoder=True):
     #       It needs to be coupled with an upsample, use reupsample=True
     num_layer_decoder_dict = {
         'conv': {256: 9, 128: 7, 64: 5, 32: 3},
+        'batch_conv': {256: 9, 128: 7, 64: 5, 32: 3},
         'coordconv': {256: 9, 128: 7, 64: 5, 32: 3},
         'resnet': {256: 9, 128: 7, 64: 5, 32: 3},
         'dense': {256: 3, 128: 3, 64: 3, 32: 3},
@@ -1326,6 +1489,19 @@ def get_encoder(config, name='encoder'):
                                     bilinear_size=(determined_size, determined_size),
                                     normalization_str=config['conv_normalization']),
             False: functools.partial(build_conv_encoder,
+                                     filter_depth=config['filter_depth'],
+                                     num_layers=num_layers,
+                                     bilinear_size=(determined_size, determined_size),
+                                     normalization_str=config['conv_normalization'])
+        },
+        'batch_conv': {
+            # True for gated, False for non-gated
+            True: functools.partial(build_batch_gated_conv_encoder,
+                                    filter_depth=config['filter_depth'],
+                                    num_layers=num_layers,
+                                    bilinear_size=(determined_size, determined_size),
+                                    normalization_str=config['conv_normalization']),
+            False: functools.partial(build_batch_conv_encoder,
                                      filter_depth=config['filter_depth'],
                                      num_layers=num_layers,
                                      bilinear_size=(determined_size, determined_size),
@@ -1393,6 +1569,19 @@ def get_decoder(config, reupsample=True, name='decoder'):
                                     num_layers=num_layers,
                                     normalization_str=config['conv_normalization']),
             False: functools.partial(build_conv_decoder,
+                                     filter_depth=config['filter_depth'],
+                                     reupsample=reupsample,
+                                     num_layers=num_layers,
+                                     normalization_str=config['conv_normalization'])
+        },
+        'batch_conv': {
+            # True for gated, False for non-gated
+            True: functools.partial(build_batch_gated_conv_decoder,
+                                    filter_depth=config['filter_depth'],
+                                    reupsample=reupsample,
+                                    num_layers=num_layers,
+                                    normalization_str=config['conv_normalization']),
+            False: functools.partial(build_batch_conv_decoder,
                                      filter_depth=config['filter_depth'],
                                      reupsample=reupsample,
                                      num_layers=num_layers,

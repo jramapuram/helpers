@@ -634,10 +634,12 @@ def get_name(args):
     name = _clean_task_str("{}_{}".format(
         args.uid if args.uid else "",
         "_".join(["{}{}".format(k, v) for k, v in filtered.items()])
-    ).replace('batchnorm', 'bn').replace('groupnorm', 'gn')
+    ).replace('batchnorm', 'bn').replace('batch_groupnorm', 'bgn')
+                           .replace('groupnorm', 'gn')
                            .replace('instancenorm', 'in')
                            .replace('weightnorm', 'wn')
                            .replace('binarized_mnist', 'bmnist')
+                           .replace("binarized_omniglot_burda", "bboglot")
                            .replace('binarized_omniglot', 'boglot')
                            .replace('omniglot', 'oglot')
                            .replace('disc_mix_logistic', 'dml')
@@ -649,6 +651,7 @@ def get_name(args):
                            .replace('parallel', 'par')
                            .replace('coordconv', 'cc')
                            .replace('dense', 'd')
+                           .replace('batch_conv', 'bc')
                            .replace('conv', 'c')
                            .replace('resnet', 'r')
                            .replace('xavier_normal', 'xn')
