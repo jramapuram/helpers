@@ -55,6 +55,32 @@ class BWtoRGB(nn.Module):
 
         return x
 
+class Upsample(nn.Module):
+    def __init__(self, size, mode='bilinear', align_corners=True):
+        """ A simple upsampler that also upsamples batches, i.e. [b_j, b_i, c, w, h]
+            in addition to the normal 4d images.
+
+        :param size: the required output shape, 2d [w, h]
+        :param mode: upsample type
+        :param align_corners: whether or not to align the corners from the upsample.
+        :returns: upsampled tensor
+        :rtype: torch.Tensor
+
+        """
+        super(Upsample, self).__init__()
+        self.output_shape = size
+        self.upsampler = nn.Upsample(size=size, mode=mode, align_corners=align_corners)
+
+    def forward(self, x):
+        original_shape = x.shape
+        if x.dim() == 5:
+            x = x.contiguous().view(-1, *original_shape[-3:])
+            upsampled = self.upsampler(x)
+            return upsampled.contiguous().view(*original_shape[0:3], *self.output_shape)
+
+        assert x.dim() == 4, "input image was neither 5d (batch) nor 4d"
+        return self.upsampler(x)
+
 
 class EMA(nn.Module):
     def __init__(self, decay=0.999):
@@ -358,9 +384,7 @@ class BatchConvTranspose2D(nn.Module):
         """
         assert len(x.shape) == 5, "batchconv2d expects a 5d [{}] tensor".format(x.shape)
         b_i, b_j, c, h, w = x.shape
-        print("input to bct2d = ", x.shape)
         out = self.conv(x.permute([1, 0, 2, 3, 4]).contiguous().view(b_j, b_i * c, h, w))
-        print("batchConv2dTransposeOutput = ", out.shape)
         return out.view(b_j, b_i, self.out_channels,
                         out.shape[-2], out.shape[-1]).permute([1, 0, 2, 3, 4])
 
@@ -940,7 +964,7 @@ def build_image_downsampler(img_shp, new_shp,
 def build_relational_conv_encoder(input_shape, filter_depth=32,
                                   activation_fn=nn.ELU, **kwargs):
     bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
-    upsampler = nn.Upsample(size=bilinear_size, mode='bilinear', align_corners=True)
+    upsampler = Upsample(size=bilinear_size, mode='bilinear', align_corners=True)
     chans = input_shape[0]
     return nn.Sequential(
         upsampler if list(input_shape[1:]) != list(bilinear_size) else Identity(),
@@ -1121,7 +1145,7 @@ def _build_resnet_encoder(input_shape, output_size, layer_type=ResnetBlock.conv3
                           filter_depth=32, activation_fn=Identity, num_layers=5,
                           normalization_str="none", **kwargs):
     bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
-    upsampler = nn.Upsample(size=bilinear_size, mode='bilinear', align_corners=True)
+    upsampler = Upsample(size=bilinear_size, mode='bilinear', align_corners=True)
     chans = input_shape[0]
 
     def _make_layer(input_size, filter_depth, downsample, stride=1):
@@ -1158,11 +1182,9 @@ def _build_conv_encoder(input_shape, output_size, layer_type=nn.Conv2d,
                         filter_depth=32, activation_fn=Identity, num_layers=4,
                         normalization_str="none", **kwargs):
     bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
-    upsampler = nn.Upsample(size=bilinear_size, mode='bilinear', align_corners=True)
+    upsampler = Upsample(size=bilinear_size, mode='bilinear', align_corners=True)
     chans = input_shape[0]
-
-    # batch groups
-    groups = kwargs.get('groups', 1)
+    groups = kwargs.get('groups', 1) # batch groups
 
     def _make_layer(input_size, filter_depth, kernel_size=4, stride=1):
         gn_groups = max(int(min(np.ceil(filter_depth / 2), 32)), 1)
@@ -1212,14 +1234,16 @@ def _build_conv_decoder(input_size, output_shape, layer_type=nn.ConvTranspose2d,
                         normalization_str='none', reupsample=True, **kwargs):
     '''Conv/FC --> BN --> Activ --> Dropout'''
     chans = output_shape[0]
+    groups = kwargs.get('groups', 1) # batch groups
+
     if reupsample:
         bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
-        upsampler = nn.Upsample(size=output_shape[1:], mode='bilinear', align_corners=True)
+        upsampler = Upsample(size=output_shape[1:], mode='bilinear', align_corners=True)
 
     def _make_layer(input_size, filter_depth, kernel_size=4, stride=1):
         gn_groups = max(int(min(np.ceil(filter_depth / 2), 32)), 1)
         return nn.Sequential(
-            add_normalization(layer_type(input_size, filter_depth, kernel_size, stride),
+            add_normalization(layer_type(input_size, filter_depth, kernel_size, stride, groups=groups),
                               normalization_str, 2, filter_depth, num_groups=gn_groups),
             activation_fn()
         )
@@ -1239,11 +1263,12 @@ def _build_conv_decoder(input_size, output_shape, layer_type=nn.ConvTranspose2d,
 
     # a flattening / reshape layer
     view_init_layer = Identity() if kwargs.get('disable_flatten', False) else  View([-1, input_size, 1, 1])
+    final_layer = nn.Conv2d if groups == 1 else BatchConv2D
 
     return nn.Sequential(
         view_init_layer,
         # input dim: z_dim x 1 x 1
-        add_normalization(layer_type(input_size, filter_depth*(2**num_layers), 4, stride=1, bias=True),
+        add_normalization(layer_type(input_size, filter_depth*(2**num_layers), 4, stride=1, bias=True, groups=groups),
                           normalization_str, 2, filter_depth*(2**num_layers), num_groups=num_init_groups),
         activation_fn(),
 
@@ -1251,12 +1276,12 @@ def _build_conv_decoder(input_size, output_shape, layer_type=nn.ConvTranspose2d,
         *intermediary_layers,
 
         # state dim: 32 x 28 x 28
-        add_normalization(layer_type(filter_depth, filter_depth, 5, stride=1),
+        add_normalization(layer_type(filter_depth, filter_depth, 5, stride=1, groups=groups),
                           normalization_str, 2, filter_depth, num_groups=num_final_groups),
         activation_fn(),
 
         # state dim: 32 x 32 x 32
-        nn.Conv2d(filter_depth, chans, 1, stride=1, bias=True),
+        final_layer(filter_depth, chans, 1, stride=1, bias=True, groups=groups),
         # output dim: num_channels x 32 x 32
         upsampler if reupsample else Identity()
     )
@@ -1269,7 +1294,7 @@ def _build_resnet_decoder(input_size, output_shape, layer_type=ResnetDeconvBlock
     chans = output_shape[0]
     if reupsample:
         bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
-        upsampler = nn.Upsample(size=output_shape[1:], mode='bilinear', align_corners=True)
+        upsampler = Upsample(size=output_shape[1:], mode='bilinear', align_corners=True)
 
     def _make_layer(input_chans, filter_depth, upsample, stride=1):
         return ResnetDeconvBlock(input_chans, filter_depth, stride=stride,
@@ -1439,21 +1464,21 @@ def _get_num_layers(layer_str, input_shape, is_encoder=True):
 
     """
     largest_image_dim = max(input_shape[1], input_shape[2])
-    input_size = min([256, 128, 64, 32], key=lambda x: abs(x - largest_image_dim))
+    input_size = min([256, 128, 64, 32, 28], key=lambda x: abs(x - largest_image_dim))
     num_layer_encoder_dict = {
-        'conv': {256: 9, 128: 7, 64: 5, 32: 4},
-        'batch_conv': {256: 9, 128: 7, 64: 5, 32: 4},
-        'coordconv': {256: 9, 128: 7, 64: 5, 32: 4},
+        'conv': {256: 9, 128: 7, 64: 5, 32: 4, 28: 3},
+        'batch_conv': {256: 9, 128: 7, 64: 5, 32: 4, 28: 3},
+        'coordconv': {256: 9, 128: 7, 64: 5, 32: 4, 28: 3},
         'resnet': {256: 11, 128: 9, 64: 7, 32: 6},
-        'dense': {256: 3, 128: 3, 64: 3, 32: 3},
+        'dense': {256: 3, 128: 3, 64: 3, 32: 3, 28: 3},
     }
 
     # NOTE: decoder layer-sizing is approximate, over-estimates a little.
     #       It needs to be coupled with an upsample, use reupsample=True
     num_layer_decoder_dict = {
-        'conv': {256: 9, 128: 7, 64: 5, 32: 3},
-        'batch_conv': {256: 9, 128: 7, 64: 5, 32: 3},
-        'coordconv': {256: 9, 128: 7, 64: 5, 32: 3},
+        'conv': {256: 9, 128: 7, 64: 5, 32: 3, 28: 3},
+        'batch_conv': {256: 9, 128: 7, 64: 5, 32: 3, 28: 3},
+        'coordconv': {256: 9, 128: 7, 64: 5, 32: 3, 28: 3},
         'resnet': {256: 9, 128: 7, 64: 5, 32: 3},
         'dense': {256: 3, 128: 3, 64: 3, 32: 3},
     }
