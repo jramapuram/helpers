@@ -42,6 +42,15 @@ class OnePlus(nn.Module):
     def forward(self, x):
         return F.softplus(x, beta=1)
 
+class Swish(nn.Module):
+    def __init__(self, beta=1, trainable_beta=False):
+        super(Swish, self).__init__()
+        self.beta = torch.zeros(1) + beta
+        if trainable_beta:
+            self.beta = self.beta.requires_grad_()
+
+    def forward(self, x):
+        return x * torch.sigmoid(self.beta * x)
 
 class BWtoRGB(nn.Module):
     def __init__(self):
@@ -899,6 +908,7 @@ def str_to_activ_module(str_activ):
         'log_sigmoid': nn.LogSigmoid,
         'tanh': nn.Tanh,
         'oneplus': OnePlus,
+        'swish': Swish,
         'softmax': nn.Softmax,
         'log_softmax': nn.LogSoftmax,
         'selu': nn.SELU,
@@ -922,6 +932,7 @@ def str_to_activ(str_activ):
         'sigmoid': torch.sigmoid,
         'tanh': torch.tanh,
         'oneplus': lambda x: F.softplus(x, beta=1),
+        'swish': lambda x: x * torch.sigmoid(x),
         'softmax': F.softmax,
         'log_softmax': F.log_softmax,
         'selu': F.selu,
@@ -1463,14 +1474,21 @@ def _get_num_layers(layer_str, input_shape, is_encoder=True):
     :rtype: int
 
     """
+    if layer_str == 'dense':
+        # dense_layer_dict = {
+        #     256: 3, 128: 3, 64: 3, 32: 3, 28: 3
+        # }
+        input_size = int(np.prod(input_shape))
+        # return [dense_layer_dict[input_size], input_size]
+        return [3, input_size]
+
     largest_image_dim = max(input_shape[1], input_shape[2])
     input_size = min([256, 128, 64, 32, 28], key=lambda x: abs(x - largest_image_dim))
     num_layer_encoder_dict = {
         'conv': {256: 9, 128: 7, 64: 5, 32: 4, 28: 3},
         'batch_conv': {256: 9, 128: 7, 64: 5, 32: 4, 28: 3},
         'coordconv': {256: 9, 128: 7, 64: 5, 32: 4, 28: 3},
-        'resnet': {256: 11, 128: 9, 64: 7, 32: 6},
-        'dense': {256: 3, 128: 3, 64: 3, 32: 3, 28: 3},
+        'resnet': {256: 11, 128: 9, 64: 7, 32: 6}
     }
 
     # NOTE: decoder layer-sizing is approximate, over-estimates a little.
@@ -1479,8 +1497,7 @@ def _get_num_layers(layer_str, input_shape, is_encoder=True):
         'conv': {256: 9, 128: 7, 64: 5, 32: 3, 28: 3},
         'batch_conv': {256: 9, 128: 7, 64: 5, 32: 3, 28: 3},
         'coordconv': {256: 9, 128: 7, 64: 5, 32: 3, 28: 3},
-        'resnet': {256: 9, 128: 7, 64: 5, 32: 3},
-        'dense': {256: 3, 128: 3, 64: 3, 32: 3},
+        'resnet': {256: 9, 128: 7, 64: 5, 32: 3}
     }
     return [num_layer_encoder_dict[layer_str][input_size], input_size] if is_encoder \
         else [num_layer_decoder_dict[layer_str][input_size], input_size]
