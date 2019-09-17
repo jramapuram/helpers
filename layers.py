@@ -1,3 +1,4 @@
+import os
 import torch
 import warnings
 import functools
@@ -608,47 +609,112 @@ def init_state(n_layers, batch_size, hidden_size, rnn_type='lstm',
     return _init_state()
 
 
-class EarlyStopping(object):
-    def __init__(self, model, max_steps=10, burn_in_interval=None, save_best=True):
-        self.max_steps = max_steps
-        self.model = model
-        self.save_best = save_best
-        self.burn_in_interval = burn_in_interval
+class ModelSaver(object):
+    def __init__(self, args, model, burn_in_interval=20, larger_is_better=False, **kwargs):
+        """ Creates earlystopping or simple best-model storer.
 
-        self.loss = 0.0
-        self.iteration = 0
-        self.stopping_step = 0
-        self.best_loss = np.inf
+        :param args: argparse object
+        :param model: nn.Module with save and load fns
+        :param burn_in_interval: dont save for at least this many epochs.
+        :param larger_is_better: are we maximizing or minimizing?
+        :returns: ModelSaver Object
+        :rtype: object
+
+        """
+        self.epoch = 1
+        self.model = model
+        self.burn_in_interval = burn_in_interval
+        self.best_loss = -np.inf if larger_is_better else np.inf
+        self.larger_is_better = larger_is_better
+        self.saver = EarlyStopping(**kwargs) if args.early_stop else BestModelSaver(**kwargs)
+
+    def save(self):
+        self.model.save(epoch=self.epoch)
 
     def restore(self):
-        self.model.load()
+        """ Restores the model, optimizer params, set the current epoch and returns
 
-    def __call__(self, loss):
-        if self.burn_in_interval is not None and self.iteration < self.burn_in_interval:
-            ''' don't save the model until the burn-in-interval has been exceeded'''
-            self.iteration += 1
-            return False
+        :returns: state dict with test predicitions dict, test loss dict, epoch
+        :rtype: dict
 
-        # detach if not already detached
-        if not isinstance(loss, (float, np.float32, np.float64)):
-            loss = loss.clone().detach()
+        """
+        restore_dict = self.model.load()
+        self.epoch = restore_dict['epoch']
+        return restore_dict
 
-        if (loss < self.best_loss):
-            self.stopping_step = 0
-            self.best_loss = loss
-            if self.save_best:
-                self.model.save(overwrite=True)
+    def __call__(self, loss, **kwargs):
+        """ Calls the underlying save object, but does comparisons here.
+
+        :param loss: current loss
+        :returns: early stopping flag (False always for BestModelsaver)
+        :rtype: bool
+
+        """
+        save_flag = False
+        if self.epoch > self.burn_in_interval:
+            is_best = self.is_best_loss(loss)
+            save_flag = self.saver(loss, is_best, **kwargs)
+            if is_best:
+                self.save()
+
+        self.epoch += 1
+        return save_flag
+
+    def is_best_loss(self, loss):
+        """ Simply checks whether our new loss is better than the previous best.
+
+        :param loss: current loss
+        :returns: flag
+        :rtype: bool
+
+        """
+        if self.larger_is_better:
+            return loss > self.best_loss
+
+        return loss < self.best_loss
+
+
+class BestModelSaver(object):
+    def __init__(self, **kwargs):
+        pass
+
+    def __call__(self, loss, is_best):
+        """ Returns false here because we don't want to early stop
+
+        :param loss: current loss
+        :param is_best: is it the best so far? (bool)
+        :returns: False
+        :rtype: bool
+
+        """
+        return False
+
+
+class EarlyStopping(object):
+    def __init__(self, max_early_stop_steps=10, **kwargs):
+        """ Returns True when loss doesn't change for max_early_stop_steps
+
+        :param max_early_stop_steps: number of steps to observe loss changes
+        :returns: EarlyStopping object
+        :rtype: object
+
+        """
+        self.max_steps = max_early_stop_steps
+        self.stopping_steps = 0
+
+    def __call__(self, loss, is_best):
+        if is_best: # reset the counter
+            self.stopping_steps = 0
         else:
-            self.stopping_step += 1
+            self.stopping_steps += 1
 
-        is_early_stop = False
-        if self.stopping_step >= self.max_steps:
-            print("Early stopping is triggered;  current_loss:{} --> best_loss:{} | iter: {}".format(
-                loss, self.best_loss, self.iteration))
-            is_early_stop = True
+        # ES Core Logic
+        if self.stopping_steps > self.max_steps:
+            self.stopping_steps = 0
+            print("Early stopping is triggered:  loss:{:4f}".format(loss))
+            return True
 
-        self.iteration += 1
-        return is_early_stop
+        return False
 
 
 def flatten_layers(model, base_index=0, is_recursive=False):
@@ -1666,35 +1732,86 @@ def get_decoder(config, reupsample=True, name='decoder'):
     return fn
 
 
-def append_save_and_load_fns(model, prefix=""):
-    """ hax to add save and load functionality to use with early-stopping module
+def append_save_and_load_fns(model, optimizer, args):
+    """ Hax to add save and load functionality to use with early-stopping module.
 
     :param model: any torch module
-    :returns: same module
-    :rtype: module
+    :param optimizer: the optimizer to save
+    :param args: argparse
+    :returns: the same module with the added methods
+    :rtype: nn.Module
 
     """
-    def load(model, prefix=""):
-        # load the model if it exists
+    from .utils import get_name
+
+    def load(model, optimizer, **kwargs):
+        """ load the model if it exists, returns the cached dictionary
+
+        :param model: the nn.Module
+        :param optimizer: nn.Optim
+        :returns: dictionary of losses and predictions
+        :rtype: dict
+
+        """
+        save_dict = {}
+
+        prefix = kwargs.get('prefix', '')
         if os.path.isdir(args.model_dir):
             model_filename = os.path.join(args.model_dir, prefix + get_name(args) + ".th")
             if os.path.isfile(model_filename):
                 print("loading existing model: {}".format(model_filename))
-                model.load_state_dict(torch.load(model_filename), strict=True)
-                return True
+
+                # load the full dictionary and set the model and optimizer params
+                save_dict = torch.load(model_filename)
+                model.load_state_dict(save_dict['model'])
+                optimizer.load_state_dict(save_dict['optimizer'])
+
+                # remove the keys that we used to load the models
+                del save_dict['model']
+                del save_dict['optimizer']
             else:
                 print("{} does not exist...".format(model_filename))
 
-        return False
+        return save_dict
 
-    def save(model, overwrite=False, prefix=""):
-        # save the model if it doesnt exist
+    def save(model, optimizer, **kwargs):
+        """ Saves a model and optimizer to a file.
+
+            Optional params:
+                  -  'overwrite' : force over-writes a savefile
+                  -  'prefix': prefix the save file with this st
+                  -  'epoch': the epoch that were at
+                  -  'loss_dict': the loss dictionary that had
+                  -  'pref_dict': the prediction dictionary that had
+
+        :param model: nn.Module
+        :param optimizer: nn.Optim
+        :returns: None
+        :rtype: None
+
+        """
+        overwrite = kwargs.get('overwrite', True)
+        prefix = kwargs.get('prefix', '')
+        epoch = kwargs.get('epoch', 0)
+        loss_dict = kwargs.get('loss_dict', {})
+        pred_dict = kwargs.get('pred_dict', {})
+
         check_or_create_dir(args.model_dir)
         model_filename = os.path.join(args.model_dir, prefix + get_name(args) + ".th")
         if not os.path.isfile(model_filename) or overwrite:
             print("saving existing model to {}".format(model_filename))
-            torch.save(model.state_dict(), model_filename)
+            torch.save(
+                {
+                    'epoch': epoch,
+                    'model': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'loss_dict': loss_dict,
+                    'pred_dict': pred_dict,
+                    'args': args
+                },
+                model_filename
+            )
 
-    model.load = functools.partial(load, model=model, prefix=prefix)
-    model.save = functools.partial(save, model=model, prefix=prefix)
+    model.load = functools.partial(load, model=model, optimizer=optimizer)
+    model.save = functools.partial(save, model=model, optimizer=optimizer)
     return model
