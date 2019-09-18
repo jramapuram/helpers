@@ -105,8 +105,11 @@ class EMA(nn.Module):
         if self.ema_val is None:
             self.ema_val = torch.zeros_like(x)
 
-        self.ema_val = self.decay * x.detach() + (1 - self.decay) * self.ema_val
-        return self.ema_val
+        if self.training:
+            self.ema_val = self.decay * x.detach() + (1 - self.decay) * self.ema_val
+            return self.ema_val
+
+        return x
 
 
 class Rotate(nn.Module):
