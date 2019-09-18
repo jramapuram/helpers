@@ -1,10 +1,13 @@
 import os
+import pickle
+import tempfile
 import torch
 import warnings
 import functools
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from copy import deepcopy
 from collections import OrderedDict
 
 from .utils import check_or_create_dir, same_type
@@ -639,7 +642,7 @@ class ModelSaver(object):
 
         """
         restore_dict = self.model.load()
-        self.epoch = restore_dict['epoch']
+        self.epoch = restore_dict['epoch'] + 1
         return restore_dict
 
     def __call__(self, loss, **kwargs):
@@ -1732,11 +1735,12 @@ def get_decoder(config, reupsample=True, name='decoder'):
     return fn
 
 
-def append_save_and_load_fns(model, optimizer, args):
+def append_save_and_load_fns(model, optimizer, grapher, args):
     """ Hax to add save and load functionality to use with early-stopping module.
 
     :param model: any torch module
     :param optimizer: the optimizer to save
+    :param grapher: the visdom or tensorboard object
     :param args: argparse
     :returns: the same module with the added methods
     :rtype: nn.Module
@@ -1744,7 +1748,7 @@ def append_save_and_load_fns(model, optimizer, args):
     """
     from .utils import get_name
 
-    def load(model, optimizer, **kwargs):
+    def load(model, optimizer, grapher, **kwargs):
         """ load the model if it exists, returns the cached dictionary
 
         :param model: the nn.Module
@@ -1753,7 +1757,7 @@ def append_save_and_load_fns(model, optimizer, args):
         :rtype: dict
 
         """
-        save_dict = {}
+        save_dict = {'epoch': 1}
 
         prefix = kwargs.get('prefix', '')
         if os.path.isdir(args.model_dir):
@@ -1765,6 +1769,7 @@ def append_save_and_load_fns(model, optimizer, args):
                 save_dict = torch.load(model_filename)
                 model.load_state_dict(save_dict['model'])
                 optimizer.load_state_dict(save_dict['optimizer'])
+                grapher.state_dict = save_dict['grapher']
 
                 # remove the keys that we used to load the models
                 del save_dict['model']
@@ -1772,9 +1777,15 @@ def append_save_and_load_fns(model, optimizer, args):
             else:
                 print("{} does not exist...".format(model_filename))
 
+        # restore the visdom grapher
+        if 'grapher' in save_dict and save_dict['grapher'] \
+           and 'scalars' in save_dict['grapher'] and save_dict['grapher']['scalars']:
+            grapher.set_data(save_dict['grapher']['scalars'], save_dict['grapher']['windows'])
+            del save_dict['grapher']
+
         return save_dict
 
-    def save(model, optimizer, **kwargs):
+    def save(model, optimizer, grapher, **kwargs):
         """ Saves a model and optimizer to a file.
 
             Optional params:
@@ -1792,7 +1803,7 @@ def append_save_and_load_fns(model, optimizer, args):
         """
         overwrite = kwargs.get('overwrite', True)
         prefix = kwargs.get('prefix', '')
-        epoch = kwargs.get('epoch', 0)
+        epoch = kwargs.get('epoch', 1)
         loss_dict = kwargs.get('loss_dict', {})
         pred_dict = kwargs.get('pred_dict', {})
 
@@ -1800,6 +1811,15 @@ def append_save_and_load_fns(model, optimizer, args):
         model_filename = os.path.join(args.model_dir, prefix + get_name(args) + ".th")
         if not os.path.isfile(model_filename) or overwrite:
             print("saving existing model to {}".format(model_filename))
+
+            # HAX: write the scalars to a temp file and re-read them
+            scalar_dict, window_dict = {}, {}
+            with tempfile.NamedTemporaryFile() as scalar, tempfile.NamedTemporaryFile() as window:
+                grapher.pickle_data(scalar.name, window.name)
+                scalar_dict = pickle.load(scalar.file)
+                window_dict = pickle.load(window.file)
+
+            # save the entire state
             torch.save(
                 {
                     'epoch': epoch,
@@ -1807,11 +1827,12 @@ def append_save_and_load_fns(model, optimizer, args):
                     'optimizer': optimizer.state_dict(),
                     'loss_dict': loss_dict,
                     'pred_dict': pred_dict,
-                    'args': args
+                    'args': args,
+                    'grapher': {'scalars': scalar_dict, 'windows': window_dict}
                 },
                 model_filename
             )
 
-    model.load = functools.partial(load, model=model, optimizer=optimizer)
-    model.save = functools.partial(save, model=model, optimizer=optimizer)
+    model.load = functools.partial(load, model=model, grapher=grapher, optimizer=optimizer)
+    model.save = functools.partial(save, model=model, grapher=grapher, optimizer=optimizer)
     return model
