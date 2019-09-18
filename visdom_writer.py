@@ -1,4 +1,5 @@
 import gc
+import pickle
 import os
 import numpy as np
 import math
@@ -102,17 +103,34 @@ class VisdomWriter:
 
         self.save()
 
-    def export_scalars_to_json(self, path):
-        """Exports to the given 'path' an ASCII file containing all the scalars written
-        so far by this instance, with the following format:
-        {writer_id : [[timestamp, step, value], ...], ...}
+    def set_data(self, scalar_dict, window_dict):
+        """ Helper to restore a scalar dict from disk
 
-        The scalars saved by ``add_scalars()`` will be flushed after export.
+        :param scalar_dict:  the scalar value dictionary
+        :param window_dict: the window dictionary
+        :returns: None
+        :rtype: None
+
         """
-        with open(path, "w") as f:
-            json.dump(self.scalar_dict, f)
-        self.scalar_dict = {}
-        self.save()
+        from copy import deepcopy
+        self.scalar_dict = deepcopy(scalar_dict)
+        self.windows = deepcopy(window_dict)
+
+    def pickle_data(self, scalar_path, window_path):
+        """ Pickle the scalar dict
+
+        :param path: path to pickle file
+        :returns: None
+        :rtype: None
+
+        """
+        with open(scalar_path, "wb") as f:
+            pickle.dump(self.scalar_dict, f)
+            #json.dump(self.scalar_dict, f)
+
+        with open(window_path, "wb") as f:
+            pickle.dump(self.windows, f)
+            #json.dump(self.scalar_dict, f)
 
     def add_histogram(self, tag, values, global_step=None, bins='tensorflow'):
         """Add histogram to summary.
