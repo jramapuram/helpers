@@ -661,6 +661,7 @@ class ModelSaver(object):
             is_best = self.is_best_loss(loss)
             save_flag = self.saver(loss, is_best, **kwargs)
             if is_best:
+                self.best_loss = loss
                 self.save()
 
         self.epoch += 1
