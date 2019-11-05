@@ -522,18 +522,14 @@ def network_to_half(network):
 
 
 def nan_check_and_break(tensor, name=""):
-    if isinstance(input, list) or isinstance(input, tuple):
-        for tensor in input:
-            return(nan_check_and_break(tensor, name))
-    else:
         if nan_check(tensor, name) is True:
             exit(-1)
 
 
 def nan_check(tensor, name=""):
-    if isinstance(input, list) or isinstance(input, tuple):
-        for tensor in input:
-            return(nan_check(tensor, name))
+    if isinstance(tensor, list) or isinstance(tensor, tuple):
+        nan_list = torch.cat([torch.sum(nan_check(t, name)).unsqueeze(0) for t in tensor], 0)
+        return torch.sum(nan_list) > 0
     else:
         if torch.sum(torch.isnan(tensor)) > 0:
             print("Tensor {} with shape {} was NaN.".format(name, tensor.shape))
@@ -594,7 +590,7 @@ def get_name(args):
     vargs = deepcopy(vars(args))
     blacklist_keys = ['visdom_url', 'visdom_port', 'data_dir', 'download', 'cuda', 'uid',
                       'debug_step', 'detect_anomalies', 'model_dir', 'calculate_fid_with',
-                      'input_shape', 'fid_model_dir']
+                      'input_shape', 'fid_model_dir', 'output_dir']
     filtered = {k:v for k,v in vargs.items() if k not in blacklist_keys} # remove useless info
 
     def _factor(name):

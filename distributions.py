@@ -32,16 +32,16 @@ def nll_activation(logits, nll_type, **kwargs):
         if kwargs['chans'] == 1:
             return torch.sigmoid(logits)
         else:
-            num_half_chans = logits.size(1) // 2
-            logits_mu = logits[:, 0:num_half_chans, :, :]
-            # logits_sigma = logits[:, num_half_chans:, :, :]
+            logits_mu, logits_sigma = get_loc_and_scale(logits)
             #return torch.bernoulli(F.sigmoid(logits_mu))
             return torch.sigmoid(logits_mu)
-    elif nll_type == "gaussian" or nll_type == "laplace":
-        num_half_chans = logits.size(1) // 2
-        logits_mu = logits[:, 0:num_half_chans, :, :]
-        # return torch.sigmoid(logits_mu)
+    elif nll_type == "gaussian":
+        logits_mu, logits_sigma = get_loc_and_scale(logits)
+        #return D.Normal(loc=logits_mu, scale=logits_sigma).sample()
         return logits_mu
+    elif nll_type == "laplace":
+        logits_mu, logits_sigma = get_loc_and_scale(logits)
+        return D.Laplace(loc=logits_mu, scale=logits_sigma).sample()
     elif nll_type == "bernoulli":
         return torch.sigmoid(logits)
     else:
@@ -153,6 +153,36 @@ def nll_disc_mix_logistic(x, recon):
     return fn(x, recon)
 
 
+def get_loc_and_scale(recon):
+    """ Helper to get the location and scale parameters by splitting a tensor.
+
+    :param recon: the tensor to split
+    :returns: loc and scale split by either channel or feature
+    :rtype: torch.Tensor, torch.Tensor
+
+    """
+    if len(recon.shape) == 5:  # for JIT type ops, eg: [10, 4, 6, 28, 28]
+        num_half_chans = recon.size(2) // 2
+        recon_mu = recon[:, :, 0:num_half_chans, :, :].contiguous()
+        recon_sigma = recon[:, :, num_half_chans:, :, :].contiguous()
+    elif len(recon.shape) == 4:
+        num_half_chans = recon.size(1) // 2
+        recon_mu = recon[:, 0:num_half_chans, :, :].contiguous()
+        recon_sigma = recon[:, num_half_chans:, :, :].contiguous()
+    elif len(recon.shape) == 3:
+        num_half_chans = recon.size(-1) // 2
+        recon_mu = recon[:, :, 0:num_half_chans].contiguous()
+        recon_sigma = recon[:, :, num_half_chans:].contiguous()
+    elif len(recon.shape) == 2:
+        num_half_feat = recon.size(-1) // 2
+        recon_mu = recon[:, 0:num_half_chans].contiguous()
+        recon_sigma = recon[:, num_half_chans:].contiguous()
+    else:
+        raise Exception("unknown dimension for gausian NLL")
+
+    return recon_mu, recon_sigma
+
+
 def nll_laplace(x, recon):
     """ Negative log-likelihood for laplace distribution
 
@@ -162,27 +192,14 @@ def nll_laplace(x, recon):
     :rtype: torch.Tensor
 
     """
-    if len(recon.shape) == 4:
-        batch_size, num_half_chans = x.size(0), recon.size(1) // 2
-        recon_mu = recon[:, 0:num_half_chans, :, :].contiguous()
-        recon_logvar = recon[:, num_half_chans:, :, :].contiguous()
+    batch_size = x.size(0)
+    loc, scale = get_loc_and_scale(recon)
 
+    # compute the NLL based on the flattened features
         nll = D.Laplace(
-            # recon_mu.view(batch_size, -1),
-            recon_mu.view(batch_size, -1),
-            # F.hardtanh(recon_logvar.view(batch_size, -1), min_val=-4.5, max_val=0) + 1e-6
-            recon_logvar.view(batch_size, -1) + eps(is_half(recon))
-        ).log_prob(x.view(batch_size, -1))
-        return -torch.sum(nll, dim=-1)
-    elif len(recon.shape) == 2:
-        batch_size, num_half_chans = x.size(0), recon.size(1) // 2
-        recon_mu = recon[:, 0:num_half_chans].contiguous()
-        recon_logvar = recon[:, num_half_chans:].contiguous()
-
-        nll = D.Laplace(
-            recon_mu.view(batch_size, -1),
-            # F.hardtanh(recon_logvar.view(batch_size, -1), min_val=-4.5, max_val=0) + 1e-6
-            recon_logvar.view(batch_size, -1) + eps(half)
+        loc=loc.view(batch_size, -1),
+        # F.hardtanh(scale.view(batch_size, -1), min_val=-4.5, max_val=0) + 1e-6
+        scale=scale.view(batch_size, -1) #+ eps(half)
         ).log_prob(x.view(batch_size, -1))
         return -torch.sum(nll, dim=-1)
 
@@ -198,21 +215,17 @@ def nll_gaussian(x, recon):
     :rtype: torch.Tensor
 
     """
-    if len(recon.shape) == 4:
-        batch_size, num_half_chans = x.size(0), recon.size(1) // 2
-        recon_mu = recon[:, 0:num_half_chans, :, :].contiguous()
-        return torch.sum(
-            F.mse_loss(input=recon_mu.view(batch_size, -1),
-                       target=x.view(batch_size, -1),
-                       reduction='none')
-        )
-    elif len(recon.shape) == 2:
-        batch_size, num_half_feat = x.size(0), recon.size(1) // 2
-        recon_mu = recon[:, 0:num_half_chans].contiguous()
-        return torch.sum(
-            F.mse_loss(input=recon_mu.view(batch_size, -1),
-                       target=x.view(batch_size, -1),
-                       reduction='none')
-        )
+    batch_size = x.size(0)
+    loc, scale = get_loc_and_scale(recon)
+    # compute the NLL based on the flattened features
 
-    raise Exception("unknown dimension for gausian NLL")
+    nll = F.mse_loss(input=x.view(batch_size, -1),
+                     target=loc.view(batch_size, -1),
+                       reduction='none')
+    return torch.sum(nll, -1)
+
+
+    # nll = D.Normal(loc=loc.view(batch_size, -1),
+    #                scale=torch.clamp(scale.view(batch_size, -1), eps(is_half(x)), 0.999) # sigm can be 0 --> -inf -inf = nan
+    # ).log_prob(x.view(batch_size, -1))
+    # return -torch.sum(nll, dim=-1)

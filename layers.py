@@ -462,8 +462,8 @@ class MaskedConv2d(nn.Conv2d):
 class GatedConv2d(nn.Module):
     '''from jmtomczak's github '''
     def __init__(self, input_channels, output_channels, kernel_size,
-                 stride, padding=0, dilation=1, activation=None, bias=True,
-                 layer_type=nn.Conv2d):
+                 stride, padding=0, dilation=1, groups=1, activation=None,
+                 bias=True, layer_type=nn.Conv2d):
         super(GatedConv2d, self).__init__()
 
         self.activation = activation
@@ -471,10 +471,10 @@ class GatedConv2d(nn.Module):
 
         self.h = layer_type(input_channels, output_channels, kernel_size,
                             stride=stride, padding=padding,
-                            dilation=dilation, bias=bias)
+                            dilation=dilation, groups=groups, bias=bias)
         self.g = layer_type(input_channels, output_channels, kernel_size,
                             stride=stride, padding=padding,
-                            dilation=dilation, bias=bias)
+                            dilation=dilation, groups=groups, bias=bias)
 
     def forward(self, x):
         if self.activation is None:
@@ -634,8 +634,9 @@ class ModelSaver(object):
         self.larger_is_better = larger_is_better
         self.saver = EarlyStopping(**kwargs) if args.early_stop else BestModelSaver(**kwargs)
 
-    def save(self):
-        self.model.save(epoch=self.epoch)
+    def save(self, **kwargs):
+        kwargs.setdefault('epoch', self.epoch)
+        self.model.save(**kwargs)
 
     def restore(self):
         """ Restores the model, optimizer params, set the current epoch and returns
@@ -646,6 +647,7 @@ class ModelSaver(object):
         """
         restore_dict = self.model.load()
         self.epoch = restore_dict['epoch'] + 1
+        self.best_loss = restore_dict.get('best_loss', self.best_loss)
         return restore_dict
 
     def __call__(self, loss, **kwargs):
@@ -659,10 +661,10 @@ class ModelSaver(object):
         save_flag = False
         if self.epoch > self.burn_in_interval:
             is_best = self.is_best_loss(loss)
-            save_flag = self.saver(loss, is_best, **kwargs)
+            save_flag = self.saver(loss, is_best)
             if is_best:
                 self.best_loss = loss
-                self.save()
+                self.save(**kwargs)
 
         self.epoch += 1
         return save_flag
@@ -762,6 +764,27 @@ def init_weights(module):
                 init_weights(mod)
 
     return module
+
+
+def _compute_group_norm_planes(normalization_str, planes):
+    """ Helper to compute group-norm planes
+
+    :param normalization_str: the type of normalization
+    :param planes: the output channels
+    :returns: number to use for group norm
+    :rtype: int
+
+    """
+    if planes % 2 == 0 and normalization_str == 'groupnorm':
+        gn_planes = max(int(min(np.ceil(planes / 2), 32)), 1)
+    elif planes % 3 == 0 and normalization_str == 'groupnorm':
+        gn_planes = max(int(min(np.ceil(planes / 3), 32)), 1)
+    elif normalization_str != 'groupnorm':
+        gn_planes = 0
+    else: # in the case where it's prime
+        gn_planes = planes
+
+    return gn_planes
 
 
 class UpsampleConvLayer(torch.nn.Module):
@@ -866,6 +889,61 @@ class DenseResnet(nn.Module):
         return self.act(out)
 
 
+class AttentionBlock(nn.Module):
+    def __init__(self, input_shape, embedding_size, num_heads=1, normalization_str="none", **kwargs):
+        """ An attention block that takes an input [B, input_size] and returns [B, embedding_size].
+            S: source seq len (assumed 1)
+            L: target seq len (assumed 1)
+            N: batch_size
+            E: embedding size
+
+        :param input_shape: the input shape of the tensor
+        :param embedding_size: the output size (equivalent to embedding size)
+        :param num_heads: the number of heads to use in parallel, NOTE: needs to be divisible by embedding_size
+        :param normalization_str: the type of dense normalization to use
+        :returns: AttentionBlock Module
+        :rtype: nn.Module
+
+        """
+        super(AttentionBlock, self).__init__()
+        # (S, N, E)
+        self.key_net = nn.Sequential(
+            _build_dense(input_shape, embedding_size, num_layers=3,
+                         normalization_str=normalization_str, **kwargs),
+            View([1, -1, embedding_size])
+        )
+
+        # (L, N, E)
+        self.query_net = nn.Sequential(
+            _build_dense(input_shape, embedding_size, num_layers=3,
+                         normalization_str=normalization_str, **kwargs),
+            View([1, -1, embedding_size])
+        )
+
+        # (S, N, E)
+        self.value_net = nn.Sequential(
+            _build_dense(input_shape, embedding_size, num_layers=3,
+                         normalization_str=normalization_str, **kwargs),
+            View([1, -1, embedding_size])
+        )
+
+        self.attn = nn.MultiheadAttention(embedding_size, num_heads=num_heads)
+
+    def forward(self, x):
+        """ Takes an input x, projects to key-dim, query-dim and value-dim and runs attn.
+
+        :param x: input tensor [B, input_size]
+        :returns: output tensor [B, embedding_size]
+        :rtype: torch.Tensor
+
+        """
+        key = self.key_net(x)
+        query = self.query_net(x)
+        value = self.value_net(x)
+
+        out = self.attn(query, key, value, need_weights=False)[0]
+        return out.squeeze()
+
 
 class ResnetBlock(nn.Module):
     def __init__(self, inplanes, planes, stride=1, downsample=None,
@@ -873,7 +951,7 @@ class ResnetBlock(nn.Module):
                  activation_fn=nn.ReLU, **kwargs):
         super(ResnetBlock, self).__init__()
         layer_type = kwargs['layer_type'] if 'layer_type' in kwargs else ResnetBlock.conv3x3
-        self.gn_planes = max(int(min(np.ceil(planes / 2), 32)), 1)
+        self.gn_planes = _compute_group_norm_planes(normalization_str, planes)
         self.conv1 = add_normalization(layer_type(inplanes, planes, stride),
                                        normalization_str, 2, planes, num_groups=self.gn_planes)
         #self.act = str_to_activ(activation_str)
@@ -923,7 +1001,7 @@ class ResnetDeconvBlock(nn.Module):
                  normalization_str="groupnorm", activation_fn=nn.ReLU, **kwargs):
         super(ResnetDeconvBlock, self).__init__()
         layer_type = kwargs['layer_type'] if 'layer_type' in kwargs else ResnetDeconvBlock.deconv3x3
-        self.gn_planes = max(int(min(np.ceil(planes / 2), 32)), 1)
+        self.gn_planes = _compute_group_norm_planes(normalization_str, planes)
         self.conv1 = add_normalization(layer_type(inplanes, planes, stride),
                                        normalization_str, 2, planes, num_groups=self.gn_planes)
         #self.act = str_to_activ(activation_str)
@@ -1271,7 +1349,7 @@ def _build_conv_encoder(input_shape, output_size, layer_type=nn.Conv2d,
     groups = kwargs.get('groups', 1) # batch groups
 
     def _make_layer(input_size, filter_depth, kernel_size=4, stride=1):
-        gn_groups = max(int(min(np.ceil(filter_depth / 2), 32)), 1)
+        gn_groups = _compute_group_norm_planes(normalization_str, filter_depth)
         return nn.Sequential(
             add_normalization(layer_type(input_size, filter_depth, kernel_size, stride, groups=groups),
                               normalization_str, 2, filter_depth, num_groups=gn_groups),
@@ -1325,7 +1403,7 @@ def _build_conv_decoder(input_size, output_shape, layer_type=nn.ConvTranspose2d,
         upsampler = Upsample(size=output_shape[1:], mode='bilinear', align_corners=True)
 
     def _make_layer(input_size, filter_depth, kernel_size=4, stride=1):
-        gn_groups = max(int(min(np.ceil(filter_depth / 2), 32)), 1)
+        gn_groups = _compute_group_norm_planes(normalization_str, filter_depth)
         return nn.Sequential(
             add_normalization(layer_type(input_size, filter_depth, kernel_size, stride, groups=groups),
                               normalization_str, 2, filter_depth, num_groups=gn_groups),
@@ -1551,9 +1629,10 @@ def _get_num_layers(layer_str, input_shape, is_encoder=True):
         # dense_layer_dict = {
         #     256: 3, 128: 3, 64: 3, 32: 3, 28: 3
         # }
-        input_size = int(np.prod(input_shape))
         # return [dense_layer_dict[input_size], input_size]
-        return [3, input_size]
+        num_layers = 3
+        input_size = int(np.prod(input_shape))
+        return [num_layers, input_size]
 
     largest_image_dim = max(input_shape[1], input_shape[2])
     input_size = min([256, 128, 64, 32, 28], key=lambda x: abs(x - largest_image_dim))
@@ -1561,7 +1640,7 @@ def _get_num_layers(layer_str, input_shape, is_encoder=True):
         'conv': {256: 9, 128: 7, 64: 5, 32: 4, 28: 3},
         'batch_conv': {256: 9, 128: 7, 64: 5, 32: 4, 28: 3},
         'coordconv': {256: 9, 128: 7, 64: 5, 32: 4, 28: 3},
-        'resnet': {256: 11, 128: 9, 64: 7, 32: 6}
+        'resnet': {256: 11, 128: 9, 64: 7, 32: 6, 28: 5}
     }
 
     # NOTE: decoder layer-sizing is approximate, over-estimates a little.
@@ -1570,7 +1649,7 @@ def _get_num_layers(layer_str, input_shape, is_encoder=True):
         'conv': {256: 9, 128: 7, 64: 5, 32: 3, 28: 3},
         'batch_conv': {256: 9, 128: 7, 64: 5, 32: 3, 28: 3},
         'coordconv': {256: 9, 128: 7, 64: 5, 32: 3, 28: 3},
-        'resnet': {256: 9, 128: 7, 64: 5, 32: 3}
+        'resnet': {256: 9, 128: 7, 64: 5, 32: 3, 28: 3}
     }
     return [num_layer_encoder_dict[layer_str][input_size], input_size] if is_encoder \
         else [num_layer_decoder_dict[layer_str][input_size], input_size]
@@ -1796,8 +1875,6 @@ def append_save_and_load_fns(model, optimizer, grapher, args):
                   -  'overwrite' : force over-writes a savefile
                   -  'prefix': prefix the save file with this st
                   -  'epoch': the epoch that were at
-                  -  'loss_dict': the loss dictionary that had
-                  -  'pref_dict': the prediction dictionary that had
 
         :param model: nn.Module
         :param optimizer: nn.Optim
@@ -1805,15 +1882,13 @@ def append_save_and_load_fns(model, optimizer, grapher, args):
         :rtype: None
 
         """
-        overwrite = kwargs.get('overwrite', True)
-        prefix = kwargs.get('prefix', '')
-        epoch = kwargs.get('epoch', 1)
-        loss_dict = kwargs.get('loss_dict', {})
-        pred_dict = kwargs.get('pred_dict', {})
+        kwargs.setdefault('overwrite', True)
+        kwargs.setdefault('prefix', '')
+        kwargs.setdefault('epoch', 1)
 
         check_or_create_dir(args.model_dir)
-        model_filename = os.path.join(args.model_dir, prefix + get_name(args) + ".th")
-        if not os.path.isfile(model_filename) or overwrite:
+        model_filename = os.path.join(args.model_dir, kwargs['prefix'] + get_name(args) + ".th")
+        if not os.path.isfile(model_filename) or kwargs['overwrite']:
             print("saving existing model to {}".format(model_filename))
 
             # HAX: write the scalars to a temp file and re-read them
@@ -1825,15 +1900,12 @@ def append_save_and_load_fns(model, optimizer, grapher, args):
 
             # save the entire state
             torch.save(
-                {
-                    'epoch': epoch,
+                {**{
                     'model': model.state_dict(),
                     'optimizer': optimizer.state_dict(),
-                    'loss_dict': loss_dict,
-                    'pred_dict': pred_dict,
                     'args': args,
                     'grapher': {'scalars': scalar_dict, 'windows': window_dict}
-                },
+                }, **kwargs},
                 model_filename
             )
 

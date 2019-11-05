@@ -1,3 +1,6 @@
 [submodule "pixel_cnn"]
 	path = pixel_cnn
 	url = git+ssh://git@github.com/jramapuram/pixel-cnn-pp.git
+[submodule "async_fid"]
+	path = async_fid
+	url = git+ssh://git@github.com/jramapuram/async_fid.git
