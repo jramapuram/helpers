@@ -97,17 +97,45 @@ class Upsample(nn.Module):
 
 class EMA(nn.Module):
     def __init__(self, decay=0.999):
+        """ Simple helper to keep track of exponential moving mean and variance.
+
+        :param decay: the decay, default is decent.
+        :returns: EMA module
+        :rtype: nn.Module
+
+        """
         super(EMA, self).__init__()
         self.decay = decay
-        self.register_buffer('ema_val', None)
+        self.register_buffer('ema_val', None) # running mean
+        self.register_buffer('ema_var', None) # running variance
+
+    def sample(self):
+        """ Return mu + \sigma^2 * eps
+
+        :returns: a sample from the running EMA
+        :rtype: torch.Tensor
+
+        """
+        epsilon = torch.randn_like(self.ema_var)
+        return self.ema_val + self.ema_var * epsilon
 
     def forward(self, x):
+        """ Takes an input and creates a variance and mean value if they dont exist and compute EMA & EMA-Var
+
+        :param x: input tensor
+        :returns: input tensor itself, just keeps the running variables internally.
+        :rtype: torch.Tensor
+
+        """
         if self.ema_val is None:
             self.ema_val = torch.zeros_like(x)
+            self.ema_var = torch.zeros_like(x)
 
-        if self.training:
-            self.ema_val = self.decay * x.detach() + (1 - self.decay) * self.ema_val
-            return self.ema_val
+        if self.training:  # only update the values if we are in a training state.
+            self.ema_val = (1 - self.decay) * x.detach() + self.decay * self.ema_val
+            # self.ema_var = (1 - self.decay) * (self.ema_var + self.decay * self.ema_val**2)
+            variance = (x.detach() - self.ema_val) ** 2
+            self.ema_var = (1 - self.decay) * variance + self.decay * self.ema_var
 
         return x
 

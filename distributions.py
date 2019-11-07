@@ -35,6 +35,8 @@ def nll_activation(logits, nll_type, **kwargs):
             logits_mu, logits_sigma = get_loc_and_scale(logits)
             #return torch.bernoulli(F.sigmoid(logits_mu))
             return torch.sigmoid(logits_mu)
+    elif nll_type == 'pixel_wise':
+        return pixel_wise_activation(logits)
     elif nll_type == "gaussian":
         logits_mu, logits_sigma = get_loc_and_scale(logits)
         #return D.Normal(loc=logits_mu, scale=logits_sigma).sample()
@@ -48,6 +50,28 @@ def nll_activation(logits, nll_type, **kwargs):
         raise Exception("unknown nll provided")
 
 
+def pixel_wise_activation(logits):
+    """ Helper to take [B, 256*C, _, _] and returns [B, C, _, _]
+
+    :param logits: the logit unactivated tensor
+    :returns: a batch of images, [B, C, _, _]
+    :rtype: torch.Tensor
+
+    """
+    # sanity checks
+    assert logits.shape[1] % 256 == 0, "tensor needs to be mod 256 for pixewise activation"
+    assert logits.dim() == 4, "need 4d image for pixelwise activation"
+
+    chans = logits.shape[1]
+    # activ = torch.cat([torch.argmax(F.softmax(logits[:, begin_c:end_c, :, :], dim=1), dim=1).unsqueeze(1)
+    #                    for begin_c, end_c in zip(range(0, chans, 256),
+    #                                              range(256, chans+1 , 256))], dim=1)
+    activ = torch.cat([torch.argmax(logits[:, begin_c:end_c, :, :], dim=1).unsqueeze(1)
+                       for begin_c, end_c in zip(range(0, chans, 256),
+                                                 range(256, chans+1 , 256))], dim=1)
+    return activ.type(torch.float32) / 255.0
+
+
 def nll_has_variance(nll_str):
     """ A simple helper to return whether we have variance in the likelihood.
 
@@ -59,6 +83,7 @@ def nll_has_variance(nll_str):
     nll_map = {
         'gaussian': True,
         'laplace': True,
+        'pixel_wise': False,
         'bernoulli': False,
         'log_logistic_256': True,
         'disc_mix_logistic': True
@@ -82,6 +107,7 @@ def nll(x, recon_x, nll_type):
         "gaussian": nll_gaussian,
         "bernoulli": nll_bernoulli,
         "laplace": nll_laplace,
+        "pixel_wise": nll_pixel_wise,
         "log_logistic_256": nll_log_logistic_256,
         "disc_mix_logistic": nll_disc_mix_logistic
     }
@@ -102,6 +128,58 @@ def nll_bernoulli(x, recon_x_logits):
         x.view(batch_size, -1)
     )
     return -torch.sum(nll, dim=-1)
+
+
+def pixel_wise_label(x):
+    """ Takes an image \in [0, 1], re-scales to 255 and returns the long-tensor
+
+    :param x: input image
+    :returns: label tensor
+    :rtype: torch.Tensor
+
+    """
+    assert x.max() <= 1 and x.min() >= 0, "pixel-wise label generation required x \in [0, 1]"
+    labels = (x * 255.0).type(torch.int64)
+    # labels = F.one_hot(labels, num_classes=256)
+    return labels
+
+
+def nll_pixel_wise(x, recon_x_logits):
+    """ NLL for pixel wise loss. Basically softmax cross-entropy \in [0, 255] per pixel.
+
+    :param x: the target tensor
+    :param recon_x_logits: the predictions
+    :returns: tensor of batch size for the NLL
+    :rtype: torch.Tensor
+
+    """
+    batch_size = x.shape[0]
+    chans = recon_x_logits.shape[1]
+    chan_dims = 3 if chans == 256*3 else 1
+
+    # sanity checks
+    assert x.shape[1] == chan_dims, "target tensor needs to be [B, {}, _, _], got {}".format(chan_dims, x.shape)
+    assert x.dim() == 4 and recon_x_logits.dim() == 4, "need 4d tensors for nll-pixelwise"
+    assert chans % 256 == 0, "reconstruction needs to have chan dim be modulo 256"
+
+    #loss = torch.zeros(x.shape[0], device=x.device) # create a running buffer
+    loss = torch.zeros_like(x)
+    targets = pixel_wise_label(x)                   # re-scale to make the image its own labels
+
+    for idx, (begin_c, end_c) in enumerate(zip(range(0, recon_x_logits.shape[1], 256),
+                                               range(256, recon_x_logits.shape[1]+1 , 256))):
+        loss_t = F.cross_entropy(input=recon_x_logits[:, begin_c:end_c, :, :],
+                                target=targets[:, idx, :, :], reduction='none')
+
+        # handle the grayscale issue
+        if loss_t.dim() < 4:
+            loss_t = loss_t.unsqueeze(1)
+
+        loss += loss_t
+
+    loss /= chan_dims # remove channel contribution
+    return torch.sum(loss.view(batch_size, -1), -1)
+
 
 
 def nll_log_logistic_256(x, recon_x_logits):
@@ -196,14 +274,12 @@ def nll_laplace(x, recon):
     loc, scale = get_loc_and_scale(recon)
 
     # compute the NLL based on the flattened features
-        nll = D.Laplace(
+    nll = D.Laplace(
         loc=loc.view(batch_size, -1),
         # F.hardtanh(scale.view(batch_size, -1), min_val=-4.5, max_val=0) + 1e-6
         scale=scale.view(batch_size, -1) #+ eps(half)
         ).log_prob(x.view(batch_size, -1))
-        return -torch.sum(nll, dim=-1)
-
-    raise Exception("unknown dimension for laplace NLL")
+    return -torch.sum(nll, dim=-1)
 
 
 def nll_gaussian(x, recon):
