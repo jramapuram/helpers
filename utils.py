@@ -634,6 +634,7 @@ def get_name(args):
                            .replace('groupnorm', 'gn')
                            .replace('instancenorm', 'in')
                            .replace('weightnorm', 'wn')
+                           .replace('pixel_wise', 'pw')
                            .replace('binarized_mnist', 'bmnist')
                            .replace("binarized_omniglot_burda", "bboglot")
                            .replace('binarized_omniglot', 'boglot')
@@ -660,6 +661,7 @@ def get_name(args):
                            .replace('zeros', 'z')
                            .replace('normal', 'n')
                            .replace('uniform', 'u')
+                           .replace('additive_vrnn', 'avrnn')
                            .replace('orthogonal', 'o')
     )
 

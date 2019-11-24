@@ -1,6 +1,8 @@
+import math
 import torch
 import torch.nn.functional as F
 import torch.distributions as D
+
 
 from .utils import ones_like, eps, is_half
 from .pixel_cnn.utils import discretized_mix_logistic_loss, \
@@ -43,7 +45,8 @@ def nll_activation(logits, nll_type, **kwargs):
         return logits_mu
     elif nll_type == "laplace":
         logits_mu, logits_sigma = get_loc_and_scale(logits)
-        return D.Laplace(loc=logits_mu, scale=logits_sigma).sample()
+        #return D.Laplace(loc=logits_mu, scale=logits_sigma).sample()
+        return torch.sigmoid(logits_mu)
     elif nll_type == "bernoulli":
         return torch.sigmoid(logits)
     else:
@@ -138,7 +141,8 @@ def pixel_wise_label(x):
     :rtype: torch.Tensor
 
     """
-    assert x.max() <= 1 and x.min() >= 0, "pixel-wise label generation required x \in [0, 1]"
+    assert x.max() <= 1 and x.min() >= 0, \
+        "pixel-wise label generation required x \in [0, 1], is [{}, {}]".format(x.min(), x.max())
     labels = (x * 255.0).type(torch.int64)
     # labels = F.one_hot(labels, num_classes=256)
     return labels
@@ -260,6 +264,18 @@ def get_loc_and_scale(recon):
 
     return recon_mu, recon_sigma
 
+def numerically_stable_exp(tensor, dim=-1):
+    """ Removes largest value and exponentiates, returning both.
+
+    :param tensor: the input tensor
+    :param dim: which is the dim to find max over
+    :returns: exp(tensor - max), max
+    :rtype: (torch.Tensor, torch.Tensor)
+
+    """
+    max_value, _ = torch.max(tensor, dim=dim)
+    return torch.exp(tensor - max_value.unsqueeze(dim)), max_value
+
 
 def nll_laplace(x, recon):
     """ Negative log-likelihood for laplace distribution
@@ -271,14 +287,19 @@ def nll_laplace(x, recon):
 
     """
     batch_size = x.size(0)
-    loc, scale = get_loc_and_scale(recon)
+    loc, log_scale = get_loc_and_scale(recon)
+    #scale, max_val = numerically_stable_exp(log_scale.view(batch_size, -1))
+    scale = torch.exp(log_scale)
 
     # compute the NLL based on the flattened features
-    nll = D.Laplace(
-        loc=loc.view(batch_size, -1),
-        # F.hardtanh(scale.view(batch_size, -1), min_val=-4.5, max_val=0) + 1e-6
-        scale=scale.view(batch_size, -1) #+ eps(half)
-        ).log_prob(x.view(batch_size, -1))
+    # nll = D.Laplace(
+    #     loc=loc.view(batch_size, -1),
+    #     # F.hardtanh(scale.view(batch_size, -1), min_val=-4.5, max_val=0) + 1e-6
+    #     scale=scale.view(batch_size, -1)
+    #     ).log_prob(x.view(batch_size, -1))
+
+    nll = -(math.log(2) + log_scale.view(batch_size, -1)) \
+        - torch.abs(x.view(batch_size, -1) - loc.view(batch_size, -1)) / scale.view(batch_size, -1)
     return -torch.sum(nll, dim=-1)
 
 
@@ -292,16 +313,21 @@ def nll_gaussian(x, recon):
 
     """
     batch_size = x.size(0)
-    loc, scale = get_loc_and_scale(recon)
-    # compute the NLL based on the flattened features
+    loc, log_scale = get_loc_and_scale(recon)
+    #scale, max_val = numerically_stable_exp(log_scale.view(batch_size, -1))
+    scale = torch.exp(log_scale)
 
-    nll = F.mse_loss(input=x.view(batch_size, -1),
-                     target=loc.view(batch_size, -1),
-                       reduction='none')
-    return torch.sum(nll, -1)
+    var = scale ** 2
+    nll = -((x.view(batch_size, -1) - loc.view(batch_size, -1)) ** 2) / (2 * var.view(batch_size, -1)) \
+        - log_scale.view(batch_size, -1) - math.log(math.sqrt(2 * math.pi))
 
+    # nll = F.mse_loss(input=x.view(batch_size, -1),
+    #                  target=loc.view(batch_size, -1),
+    #                  reduction='none')
 
     # nll = D.Normal(loc=loc.view(batch_size, -1),
-    #                scale=torch.clamp(scale.view(batch_size, -1), eps(is_half(x)), 0.999) # sigm can be 0 --> -inf -inf = nan
+    #                #scale=torch.clamp(scale.view(batch_size, -1), eps(is_half(x)), 0.999) # sigm can be 0 --> -inf -inf = nan
+    #                scale=scale
     # ).log_prob(x.view(batch_size, -1))
-    # return -torch.sum(nll, dim=-1)
+
+    return -torch.sum(nll, dim=-1)
