@@ -2,12 +2,11 @@ import os
 import pickle
 import tempfile
 import torch
-import warnings
 import functools
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from copy import deepcopy
+from typing import Tuple
 from collections import OrderedDict
 
 from .utils import check_or_create_dir, same_type
@@ -46,6 +45,7 @@ class OnePlus(nn.Module):
     def forward(self, x):
         return F.softplus(x, beta=1)
 
+
 class Swish(nn.Module):
     def __init__(self, beta=1, trainable_beta=False):
         super(Swish, self).__init__()
@@ -55,6 +55,7 @@ class Swish(nn.Module):
 
     def forward(self, x):
         return x * torch.sigmoid(self.beta * x)
+
 
 class BWtoRGB(nn.Module):
     def __init__(self):
@@ -67,6 +68,7 @@ class BWtoRGB(nn.Module):
             return torch.cat([x, x, x], 1)
 
         return x
+
 
 class Upsample(nn.Module):
     def __init__(self, size, mode='bilinear', align_corners=True):
@@ -106,11 +108,11 @@ class EMA(nn.Module):
         """
         super(EMA, self).__init__()
         self.decay = decay
-        self.register_buffer('ema_val', None) # running mean
-        self.register_buffer('ema_var', None) # running variance
+        self.register_buffer('ema_val', None)  # running mean
+        self.register_buffer('ema_var', None)  # running variance
 
     def sample(self):
-        """ Return mu + \sigma^2 * eps
+        """ Return mu + sigma^2 * eps
 
         :returns: a sample from the running EMA
         :rtype: torch.Tensor
@@ -207,7 +209,7 @@ class AddCoordinates(object):
 
     def __call__(self, image):
         batch_size, _, image_height, image_width = image.size()
-        if image_height == image_width == 1: # handle [B, C, 1, 1] case
+        if image_height == image_width == 1:  # handle [B, C, 1, 1] case
             y_coords = torch.tensor([[1]])
             x_coords = torch.tensor([[1]])
         else:
@@ -508,9 +510,9 @@ class GatedConv2d(nn.Module):
         if self.activation is None:
             h = self.h(x)
         else:
-            h = self.activation( self.h( x ) )
+            h = self.activation(self.h(x))
 
-        g = self.sigmoid( self.g( x ) )
+        g = self.sigmoid(self.g(x))
 
         return h * g
 
@@ -533,9 +535,9 @@ class GatedDense(nn.Module):
         if self.activation is None:
             h = self.h(x)
         else:
-            h = self.activation( self.h( x ) )
+            h = self.activation(self.h(x))
 
-        g = self.sigmoid( self.g( x ) )
+        g = self.sigmoid(self.g(x))
 
         return h * g
 
@@ -635,7 +637,7 @@ def init_state(n_layers, batch_size, hidden_size, rnn_type='lstm',
         ).zero_().requires_grad_()
 
     if rnn_type == 'lstm':
-        return ( # LSTM state is (h, c)
+        return (  # LSTM state is (h, c)
             _init_state(),
             _init_state()
         )
@@ -740,7 +742,7 @@ class EarlyStopping(object):
         self.stopping_steps = 0
 
     def __call__(self, loss, is_best):
-        if is_best: # reset the counter
+        if is_best:  # reset the counter
             self.stopping_steps = 0
         else:
             self.stopping_steps += 1
@@ -770,7 +772,7 @@ def flatten_layers(model, base_index=0, is_recursive=False):
             sub_layers, base_index = flatten_layers(l, base_index, is_recursive=True)
             layers.extend(sub_layers)
         else:
-            layers.append(('layer_%d'%base_index, l))
+            layers.append(('layer_%d' % base_index, l))
             base_index += 1
 
     if not is_recursive:
@@ -809,28 +811,28 @@ def _compute_group_norm_planes(normalization_str, planes):
         gn_planes = max(int(min(np.ceil(planes / 3), 32)), 1)
     elif normalization_str != 'groupnorm':
         gn_planes = 0
-    else: # in the case where it's prime
+    else:  # in the case where it's prime
         gn_planes = planes
 
     return gn_planes
 
 
-class UpsampleConvLayer(torch.nn.Module):
+class UpsampleConvLayer(nn.Module):
     '''Upsamples the input and then does a convolution.
     This method gives better results compared to ConvTranspose2d.
     ref: http://distill.pub/2016/deconv-checkerboard/ '''
 
-    def __init__(self, in_channels, out_channels, kernel_size, stride, upsample=None):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, upsample=2):
         super(UpsampleConvLayer, self).__init__()
         self.upsample = upsample
         if upsample:
-            self.upsample_layer = torch.nn.Upsample(scale_factor=upsample,
-                                                    mode='bilinear',
-                                                    align_corners=True)
+            self.upsample_layer = nn.Upsample(scale_factor=upsample,
+                                              mode='nearest',
+                                              align_corners=None)
 
         reflection_padding = kernel_size // 2
-        self.reflection_pad = torch.nn.ReflectionPad2d(reflection_padding)
-        self.conv2d = torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride)
+        self.reflection_pad = nn.ReflectionPad2d(reflection_padding)
+        self.conv2d = nn.Conv2d(in_channels, out_channels, kernel_size, stride)
 
     def forward(self, x):
         x_in = x
@@ -840,6 +842,7 @@ class UpsampleConvLayer(torch.nn.Module):
         out = self.reflection_pad(x_in)
         out = self.conv2d(out)
         return out
+
 
 class Annealer(nn.Module):
     def __init__(self, initial_temp=10, min_temp=1e-6, anneal_rate=3e-6, interval=10, use_hard=False):
@@ -885,6 +888,7 @@ class Annealer(nn.Module):
 
         self.iteration += 1
         return float(self.tau)
+
 
 class DenseResnet(nn.Module):
     def __init__(self, input_size, output_size, normalization_str="none", activation_fn=nn.ReLU):
@@ -982,7 +986,7 @@ class ResnetBlock(nn.Module):
         self.gn_planes = _compute_group_norm_planes(normalization_str, planes)
         self.conv1 = add_normalization(layer_type(inplanes, planes, stride),
                                        normalization_str, 2, planes, num_groups=self.gn_planes)
-        #self.act = str_to_activ(activation_str)
+        # self.act = str_to_activ(activation_str)
         self.act = activation_fn()
         self.conv2 = add_normalization(layer_type(planes, planes),
                                        normalization_str, 2, planes, num_groups=self.gn_planes)
@@ -1001,7 +1005,6 @@ class ResnetBlock(nn.Module):
         """3x3 convolution with padding"""
         return GatedConv2d(in_planes, out_planes, kernel_size=3, stride=stride,
                            padding=1, bias=False)
-
 
     def downsampler(self, inplanes, planes, normalization_str):
         return add_normalization(nn.Conv2d(inplanes, planes, kernel_size=1,
@@ -1025,56 +1028,55 @@ class ResnetBlock(nn.Module):
 
 
 class ResnetDeconvBlock(nn.Module):
-    def __init__(self, inplanes, planes, stride=1, upsample=None,
-                 normalization_str="groupnorm", activation_fn=nn.ReLU, **kwargs):
+    def __init__(self, in_channels, out_channels, layer_fn, upsample=None,
+                 normalization_str="batchnorm", activation_str="relu", **kwargs):
         super(ResnetDeconvBlock, self).__init__()
-        layer_type = kwargs['layer_type'] if 'layer_type' in kwargs else ResnetDeconvBlock.deconv3x3
-        self.gn_planes = _compute_group_norm_planes(normalization_str, planes)
-        self.conv1 = add_normalization(layer_type(inplanes, planes, stride),
-                                       normalization_str, 2, planes, num_groups=self.gn_planes)
-        #self.act = str_to_activ(activation_str)
-        self.act = activation_fn()
-        self.conv2 = add_normalization(layer_type(planes, planes),
-                                       normalization_str, 2, planes, num_groups=self.gn_planes)
-        self.stride = stride
-        self.upsampler = add_normalization(
-            nn.ConvTranspose2d(inplanes, planes, stride),
-            normalization_str, 2, planes, num_groups=self.gn_planes) \
-            if upsample is not None else None
+        gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, out_channels)}
+        norm_fn = functools.partial(
+            add_normalization, normalization_str=normalization_str,
+            ndims=2, nfeatures=out_channels, **gn_groups)
 
-    @staticmethod
-    def deconv3x3(in_planes, out_planes, stride=1):
-        """3x3 convolution with padding"""
-        # nn.ConvTranspose2d(input_size, filter_depth*8, 4, stride=1, bias=True),
-        return nn.ConvTranspose2d(in_planes, out_planes, kernel_size=3, stride=stride,
-                                  padding=0, bias=False)
+        # The actual underlying model
+        self.upsample = upsample
+        self.conv1 = norm_fn(layer_fn(in_channels, out_channels))
+        self.act = str_to_activ(activation_str)
+        self.conv2 = norm_fn(layer_fn(out_channels, out_channels))
 
-    @staticmethod
-    def gated_deconv3x3(in_planes, out_planes, stride=1):
-        """3x3 convolution with padding"""
-        layer_type = functools.partial(GatedConv2d, layer_type=nn.ConvTranspose2d)
-        return layer_type(in_planes, out_planes, kernel_size=3, stride=stride,
-                          padding=0, bias=False)
+        # Learnable skip-connection
+        self.skip_connection = None
+        if in_channels != out_channels or upsample is not None:
+            self.skip_connection = norm_fn(layer_fn(in_channels, out_channels,
+                                                    kernel_size=1, padding=0))
 
-    def upsample(self, x, output_shape, mode='bilinear'):
-        upsampled = self.upsampler(x)
-        return F.upsample(upsampled, size=output_shape[-2:], mode=mode, align_corners=True)
+    # @staticmethod
+    # def deconv3x3(in_planes, out_planes, stride=1):
+    #     """3x3 convolution with padding"""
+    #     # nn.ConvTranspose2d(input_size, filter_depth*8, 4, stride=1, bias=True),
+    #     return nn.ConvTranspose2d(in_planes, out_planes, kernel_size=3, stride=stride,
+    #                               padding=0, bias=False)
+
+    # @staticmethod
+    # def gated_deconv3x3(in_planes, out_planes, stride=1):
+    #     """3x3 convolution with padding"""
+    #     layer_type = functools.partial(GatedConv2d, layer_type=nn.ConvTranspose2d)
+    #     return layer_type(in_planes, out_planes, kernel_size=3, stride=stride,
+    #                       padding=0, bias=False)
 
     def forward(self, x):
         residual = x
-
         out = self.conv1(x)
         out = self.act(out)
+        if self.upsample:
+            out = self.upsample(out)
+            residual = self.upsample(residual)
+
         out = self.conv2(out)
 
-        if self.upsampler is not None:
-            residual = self.upsample(x, out.shape)
+        if self.skip_connection is not None:
+            residual = self.skip_connection(x)
 
         # print("out = ", out.shape, " | res = ", residual.shape, " | x = ", x.shape)
-        out += residual
-        out = self.act(out)
-
-        return out
+        return out + residual
 
 
 def str_to_activ_module(str_activ):
@@ -1147,43 +1149,17 @@ def build_image_downsampler(img_shp, new_shp,
     assert kernel_height > 0
     assert kernel_width > 0
 
-    return  nn.AvgPool2d(kernel_size=(kernel_height, kernel_width),
-                         stride=stride, padding=padding)
-
-
-def build_relational_conv_encoder(input_shape, filter_depth=32,
-                                  activation_fn=nn.ELU, **kwargs):
-    bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
-    upsampler = Upsample(size=bilinear_size, mode='bilinear', align_corners=True)
-    chans = input_shape[0]
-    return nn.Sequential(
-        upsampler if list(input_shape[1:]) != list(bilinear_size) else Identity(),
-        # input dim: num_channels x 32 x 32
-        nn.Conv2d(chans, filter_depth, 5, stride=1, bias=True),
-        nn.BatchNorm2d(filter_depth),
-        activation_fn(),
-        # state dim: 32 x 28 x 28
-        nn.Conv2d(filter_depth, filter_depth*2, 4, stride=2, bias=True),
-        nn.BatchNorm2d(filter_depth*2),
-        activation_fn(),
-        # state dim: 64 x 13 x 13
-        nn.Conv2d(filter_depth*2, filter_depth*4, 4, stride=1, bias=True),
-        nn.BatchNorm2d(filter_depth*4),
-        activation_fn(),
-        # state dim: 128 x 10 x 10
-        nn.Conv2d(filter_depth*4, filter_depth*8, 4, stride=2, bias=True)
-        # state dim: 256 x 4 x 4
-    )
-
+    return nn.AvgPool2d(kernel_size=(kernel_height, kernel_width),
+                        stride=stride, padding=padding)
 
 
 def build_pixelcnn_decoder(input_size, output_shape, filter_depth=64,
                            activation_fn=nn.ReLU, normalization_str="none",
                            nr_logistic_mix=10, layer_type=MaskedConv2d, **kwargs):
     ''' modified from jmtomczak's github, do not use, use submodule pixelcnn '''
-    #warnings.warn("use pixelcnn from helpers submodule instead, this is not tested")
+    # warnings.warn("use pixelcnn from helpers submodule instead, this is not tested")
     chans = output_shape[0]
-    #num_mix = 3 if chans == 1 else 10
+    # num_mix = 3 if chans == 1 else 10
 
     return nn.Sequential(
         add_normalization(layer_type('A', input_size, filter_depth, 3, 1, 1, bias=False),
@@ -1257,55 +1233,54 @@ def add_normalization(module, normalization_str, ndims, nfeatures, **kwargs):
     return nn.Sequential(module, norm_map[normalization_str][ndims](nfeatures, **kwargs))
 
 
-def build_gated_conv_encoder(input_shape, output_size, filter_depth=32,
-                             activation_fn=Identity, num_layers=4,
-                             normalization_str="none", **kwargs):
-    return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=GatedConv2d,
-                               filter_depth=filter_depth, activation_fn=activation_fn,
-                               num_layers=num_layers, normalization_str=normalization_str, **kwargs)
+# def build_gated_conv_encoder(input_shape, output_size, filter_depth=32,
+#                              activation_fn=Identity, num_layers=4,
+#                              normalization_str="none", **kwargs):
+#     return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=GatedConv2d,
+#                                filter_depth=filter_depth, activation_fn=activation_fn,
+#                                num_layers=num_layers, normalization_str=normalization_str, **kwargs)
 
 
-def build_coord_conv_encoder(input_shape, output_size, filter_depth=32,
-                             activation_fn=Identity, num_layers=4,
-                             normalization_str="none", **kwargs):
-    return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=CoordConv,
-                               filter_depth=filter_depth, activation_fn=activation_fn,
-                               num_layers=num_layers, normalization_str=normalization_str, **kwargs)
+# def build_coord_conv_encoder(input_shape, output_size, filter_depth=32,
+#                              activation_fn=Identity, num_layers=4,
+#                              normalization_str="none", **kwargs):
+#     return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=CoordConv,
+#                                filter_depth=filter_depth, activation_fn=activation_fn,
+#                                num_layers=num_layers, normalization_str=normalization_str, **kwargs)
 
 
-def build_gated_coord_conv_encoder(input_shape, output_size, filter_depth=32,
-                             activation_fn=Identity, num_layers=4,
-                             normalization_str="none", **kwargs):
-    layer_type = functools.partial(GatedConv2d, layer_type=CoordConv)
-    return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=layer_type,
-                               filter_depth=filter_depth, activation_fn=activation_fn,
-                               num_layers=num_layers, normalization_str=normalization_str, **kwargs)
+# def build_gated_coord_conv_encoder(input_shape, output_size, filter_depth=32,
+#                                    activation_fn=Identity, num_layers=4,
+#                                    normalization_str="none", **kwargs):
+#     layer_type = functools.partial(GatedConv2d, layer_type=CoordConv)
+#     return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=layer_type,
+#                                filter_depth=filter_depth, activation_fn=activation_fn,
+#                                num_layers=num_layers, normalization_str=normalization_str, **kwargs)
 
 
-def build_conv_encoder(input_shape, output_size, filter_depth=32,
-                       activation_fn=nn.SELU, num_layers=4,
-                       normalization_str="none", **kwargs):
-    return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=nn.Conv2d,
-                               filter_depth=filter_depth, activation_fn=activation_fn,
-                               num_layers=num_layers, normalization_str=normalization_str, **kwargs)
+# def build_conv_encoder(input_shape, output_size, filter_depth=32,
+#                        activation_fn=nn.SELU, num_layers=4,
+#                        normalization_str="none", **kwargs):
+#     return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=nn.Conv2d,
+#                                filter_depth=filter_depth, activation_fn=activation_fn,
+#                                num_layers=num_layers, normalization_str=normalization_str, **kwargs)
 
-# batch versions
-def build_batch_gated_conv_encoder(input_shape, output_size, filter_depth=32,
-                                   activation_fn=Identity, num_layers=4,
-                                   normalization_str="none", **kwargs):
-    layer_type = functools.partial(GatedConv2d, layer_type=BatchConv2D)
-    return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=layer_type,
-                               filter_depth=filter_depth, activation_fn=activation_fn,
-                               num_layers=num_layers, normalization_str=normalization_str, **kwargs)
+# # batch versions
+# def build_batch_gated_conv_encoder(input_shape, output_size, filter_depth=32,
+#                                    activation_fn=Identity, num_layers=4,
+#                                    normalization_str="none", **kwargs):
+#     layer_type = functools.partial(GatedConv2d, layer_type=BatchConv2D)
+#     return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=layer_type,
+#                                filter_depth=filter_depth, activation_fn=activation_fn,
+#                                num_layers=num_layers, normalization_str=normalization_str, **kwargs)
 
 
-def build_batch_conv_encoder(input_shape, output_size, filter_depth=32,
-                             activation_fn=nn.SELU, num_layers=4,
-                             normalization_str="none", **kwargs):
-    return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=BatchConv2D,
-                               filter_depth=filter_depth, activation_fn=activation_fn,
-                               num_layers=num_layers, normalization_str=normalization_str, **kwargs)
-
+# def build_batch_conv_encoder(input_shape, output_size, filter_depth=32,
+#                              activation_fn=nn.SELU, num_layers=4,
+#                              normalization_str="none", **kwargs):
+#     return _build_conv_encoder(input_shape=input_shape, output_size=output_size, layer_type=BatchConv2D,
+#                                filter_depth=filter_depth, activation_fn=activation_fn,
+#                                num_layers=num_layers, normalization_str=normalization_str, **kwargs)
 
 
 def build_volume_preserving_resnet(input_shape, filter_depth=32,
@@ -1313,6 +1288,7 @@ def build_volume_preserving_resnet(input_shape, filter_depth=32,
                                    normalization_str="none", **kwargs):
     assert num_layers % 2 == 0, "need even layers for upscale --> downscale"
     chans = input_shape[0]
+
     def _make_layer(inchan, outchan, stride):
         return ResnetBlock(inchan, outchan, stride=1,
                            normalization_str=normalization_str,
@@ -1326,261 +1302,929 @@ def build_volume_preserving_resnet(input_shape, filter_depth=32,
         *[_make_layer(filter_depth*(2**i), filter_depth*(2**(i+1)), stride=1) for i in range(num_layers//2)],
         *[_make_layer(filter_depth*(2**(i+1)), filter_depth*(2**i), stride=1) for i in range(num_layers//2 - 1, -1, -1)],
         ResnetBlock(filter_depth, chans, stride=1, normalization_str=normalization_override, downsample=True, activation_fn=activation_fn, **kwargs),
-        #nn.Conv2d(chans, chans, kernel_size=1, stride=1),
+        # nn.Conv2d(chans, chans, kernel_size=1, stride=1),
         Squeeze()
     )
 
 
-def _build_resnet_encoder(input_shape, output_size, layer_type=ResnetBlock.conv3x3,
-                          filter_depth=32, activation_fn=Identity, num_layers=5,
-                          normalization_str="none", **kwargs):
-    bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
-    upsampler = Upsample(size=bilinear_size, mode='bilinear', align_corners=True)
-    chans = input_shape[0]
+# def _build_resnet_encoder(input_shape, output_size, layer_type=ResnetBlock.conv3x3,
+#                           filter_depth=32, activation_fn=Identity, num_layers=5,
+#                           normalization_str="none", **kwargs):
+#     bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
+#     upsampler = Upsample(size=bilinear_size, mode='bilinear', align_corners=True)
+#     chans = input_shape[0]
 
-    def _make_layer(input_size, filter_depth, downsample, stride=1):
-        return ResnetBlock(input_size, filter_depth, stride=stride, downsample=downsample, layer_type=layer_type,
-                           normalization_str=normalization_str, activation_fn=activation_fn, **kwargs)
+#     def _make_layer(input_size, filter_depth, downsample, stride=1):
+#         return ResnetBlock(input_size, filter_depth, stride=stride, downsample=downsample, layer_type=layer_type,
+#                            normalization_str=normalization_str, activation_fn=activation_fn, **kwargs)
 
-    # build the second to N-1 layers
-    strides = [2 if i % 2 == 0 else 1 for i in range(num_layers)]
-    intermediary_layers = [
-        _make_layer(filter_depth*(2**i), filter_depth*(2**j), downsample=True, stride=s) for i, j, s in zip(range(0, num_layers),
-                                                                                                            range(1, num_layers+1),
-                                                                                                            strides)
-    ]
+#     # build the second to N-1 layers
+#     strides = [2 if i % 2 == 0 else 1 for i in range(num_layers)]
+#     intermediary_layers = [
+#         _make_layer(filter_depth*(2**i), filter_depth*(2**j), downsample=True, stride=s) for i, j, s in zip(range(0, num_layers),
+#                                                                                                             range(1, num_layers+1),
+#                                                                                                             strides)
+#     ]
 
-    return nn.Sequential(
-        upsampler if list(input_shape[1:]) != list(bilinear_size) else Identity(),
+#     return nn.Sequential(
+#         upsampler if list(input_shape[1:]) != list(bilinear_size) else Identity(),
 
-        # input dim: num_channels x 32 x 32
-        _make_layer(chans, filter_depth, downsample=True, stride=2),
+#         # input dim: num_channels x 32 x 32
+#         _make_layer(chans, filter_depth, downsample=True, stride=2),
 
-        # add dynamic intermediary layers
-        *intermediary_layers,
+#         # add dynamic intermediary layers
+#         *intermediary_layers,
 
-        # state dim: 512 x 1 x 1
-        _make_layer(filter_depth*(2**num_layers), output_size, downsample=True, stride=2),
+#         # state dim: 512 x 1 x 1
+#         _make_layer(filter_depth*(2**num_layers), output_size, downsample=True, stride=2),
 
-        # output dim: opt.z_dim x 1 x 1
-        nn.Conv2d(output_size, output_size, kernel_size=1, stride=1),
-        Squeeze()
-    )
+#         # output dim: opt.z_dim x 1 x 1
+#         nn.Conv2d(output_size, output_size, kernel_size=1, stride=1),
+#         Squeeze()
+#     )
 
 
-def _build_conv_encoder(input_shape, output_size, layer_type=nn.Conv2d,
-                        filter_depth=32, activation_fn=Identity, num_layers=4,
-                        normalization_str="none", **kwargs):
-    bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
-    upsampler = Upsample(size=bilinear_size, mode='bilinear', align_corners=True)
-    chans = input_shape[0]
-    groups = kwargs.get('groups', 1) # batch groups
+# def _build_resnet_decoder(input_size, output_shape, layer_type=ResnetDeconvBlock.deconv3x3,
+#                           filter_depth=32, activation_fn=nn.SELU, num_layers=3,
+#                           normalization_str='none', reupsample=True, **kwargs):
+#     '''Conv/FC --> BN --> Activ --> Dropout'''
+#     chans = output_shape[0]
+#     if reupsample:
+#         bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
+#         upsampler = Upsample(size=output_shape[1:], mode='bilinear', align_corners=True)
 
-    def _make_layer(input_size, filter_depth, kernel_size=4, stride=1):
-        gn_groups = _compute_group_norm_planes(normalization_str, filter_depth)
-        return nn.Sequential(
-            add_normalization(layer_type(input_size, filter_depth, kernel_size, stride, groups=groups),
-                              normalization_str, 2, filter_depth, num_groups=gn_groups),
-            activation_fn()
+#     def _make_layer(input_chans, filter_depth, upsample, stride=1):
+#         return ResnetDeconvBlock(input_chans, filter_depth, stride=stride,
+#                                  upsample=upsample, layer_type=layer_type,
+#                                  normalization_str=normalization_str,
+#                                  activation_fn=activation_fn)
+
+#     # build the second to N-1 layers
+#     strides = [2 if i % 2 == 0 else 1 for i in range(num_layers)]
+#     upsamples = [True if i % 2 == 0 else False for i in range(num_layers)]
+#     intermediary_layers = [
+#         _make_layer(filter_depth*(2**i), filter_depth*(2**j), upsample=u ,stride=s) for i, j, s, u in zip(range(num_layers, -1, -1),
+#                                                                                                           range(num_layers-1, -1, -1),
+#                                                                                                           strides,
+#                                                                                                           upsamples)
+#     ]
+
+#     return nn.Sequential(
+#         View([-1, input_size, 1, 1]),
+#         # input dim: z_dim x 1 x 1
+#         _make_layer(input_size, filter_depth*(2**num_layers), upsample=False, stride=1),
+
+#         # add intermediary layers
+#         *intermediary_layers,
+
+#         # state dim: 32 x 28 x 28
+#         _make_layer(filter_depth, filter_depth, upsample=False, stride=1),
+
+#         # state dim: 32 x 32 x 32
+#         nn.Conv2d(filter_depth, chans, 1, stride=1, bias=True),
+
+#         # output dim: num_channels x 32 x 32
+#         upsampler if reupsample else Identity()
+#     )
+
+
+# def _build_resnet_decoder(input_chans, output_shape, layer_fn,
+#                           base_channels=1024,
+#                           channel_multiplier=0.5,
+#                           kernels=[3, 3, 3],
+#                           strides=[1, 1, 1],
+#                           activation_str="relu",
+#                           normalization_str="none",
+#                           norm_first_layer=False,
+#                           norm_last_layer=False,
+#                           **kwargs):
+#     F.batch_norm()
+#     """ Helper to build an arbitrary convolutional decoder.
+
+#     :param input_chans: number of input channels
+#     :param output_shape: [C, H, W] output shape
+#     :param layer_fn: what layer function to use?
+#     :param base_channels: base feature maps
+#     :param channel_multiplier: expand by this per layer, usually < 1
+#     :param kernels: list of kernels per layer
+#     :param strides: list of strides for each layer
+#     :param activation_str: what activation function to use
+#     :param normalization_str: layer normalization type, eg: batchnorm
+#     :param norm_first_layer: apply normalization to the input layer?
+#     :param norm_last_layer: apply normalization to the final layer?
+#     :returns: a model with a bunch of conv layers.
+#     :rtype: nn.Sequential
+
+#     """
+#     norm_fn = functools.partial(
+#         add_normalization, normalization_str=normalization_str, ndims=2)
+#     activation_fn = str_to_activ_module(activation_str)
+#     layers = []
+
+#     if norm_first_layer:
+#         init_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, input_chans)}
+#         layers.append(norm_fn(Identity(), nfeatures=input_chans, **init_gn_groups))
+#         # layers.append(activation_fn())  # TODO(jramapuram): consider this.
+
+#     # build the initial layer
+#     init_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, base_channels)}
+#     layers.append(ResnetDeconvBlock(input_chans, filter_depth, stride=stride,
+#                                     upsample=upsample, layer_type=layer_type,
+#                                     normalization_str=normalization_str,
+#                                     activation_fn=activation_fn))
+#     layers.append(norm_fn(layer_fn(input_chans, base_channels, kernel_size=kernels[0], stride=strides[0]),
+#                           nfeatures=base_channels, **init_gn_groups))
+#     # layers.append(Attention(base_channels, SNConv2d))
+#     layers.append(activation_fn())
+
+    # ResnetDeconvBlock(input_chans, filter_depth, stride=stride,
+    #                   upsample=upsample, layer_type=layer_type,
+    #                   normalization_str=normalization_str,
+    #                   activation_fn=activation_fn)
+
+
+def _build_resnet_decoder(input_chans, output_shape,
+                          layer_fn=nn.ConvTranspose2d,
+                          base_channels=1024,
+                          channel_multiplier=0.5,
+                          kernels=[3, 3, 3],
+                          strides=[1, 1, 1],
+                          upsample=[True, True, True],
+                          activation_str="relu",
+                          normalization_str="none",
+                          norm_first_layer=False,
+                          norm_last_layer=False,
+                          **kwargs):
+    """ Helper to build an arbitrary convolutional decoder.
+
+    :param input_chans: number of input channels
+    :param output_shape: [C, H, W] output shape
+    :param layer_fn: what layer function to use?
+    :param base_channels: base feature maps
+    :param channel_multiplier: expand by this per layer, usually < 1
+    :param kernels: list of kernels per layer
+    :param strides: list of strides for each layer
+    :param activation_str: what activation function to use
+    :param normalization_str: layer normalization type, eg: batchnorm
+    :param norm_first_layer: apply normalization to the input layer?
+    :param norm_last_layer: apply normalization to the final layer?
+    :returns: a model with a bunch of conv layers.
+    :rtype: nn.Sequential
+
+    """
+    # Normalization for pre and post model.
+    norm_fn = functools.partial(
+        add_normalization, module=Identity(), normalization_str=normalization_str, ndims=2)
+    layers = []
+
+    if norm_first_layer:
+        init_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, input_chans)}
+        layers.append(norm_fn(nfeatures=input_chans, **init_gn_groups))
+        # layers.append(activation_fn())  # TODO(jramapuram): consider this.
+
+    # build the channel map.
+    channels = [input_chans, int(base_channels)]
+    for i in range(len(kernels) - 1):  # -1 because last one is output_shape[1]
+        channels.append(int(channel_multiplier*channels[-1]))
+
+    # build the rest of the layers, from 0 --> end -1
+    for k, s, u, chan_in, chan_out in zip(kernels[0:-1], strides[0:-1], upsample, channels[0:-1], channels[1:]):
+        # Build the layer definition
+        layer_fn_i = functools.partial(layer_fn, kernel_size=k, stride=s)
+        upsample_i = functools.partial(F.interpolate, scale_factor=2) if u else None
+
+        # Construct the actual underlying layer
+        layer_i = ResnetDeconvBlock(chan_in, chan_out,
+                                    upsample=upsample_i,
+                                    layer_fn=layer_fn_i,
+                                    normalization_str=normalization_str,
+                                    activation_str=activation_str)
+        layers.append(layer_i)
+        # TODO(jramapuram): consider adding attentions
+        # layers.append(Attention(chan_out, SNConv2d))
+
+    # build the final layer
+    output_chans = output_shape[0]
+    layers.append(add_normalization(layer_fn(channels[-2], output_chans, kernel_size=kernels[-1], stride=strides[-1]),
+                                    normalization_str=normalization_str, ndims=2,
+                                    nfeatures=output_chans, **final_gn_groups))
+    layers.append(ResnetDeconvBlock(chan_in, chan_out,
+                                    upsample=upsample_i,
+                                    layer_fn=layer_fn_i,
+                                    normalization_str=normalization_str,
+                                    activation_str=activation_str))
+
+    # Add normalization to the final layer if requested
+    if norm_last_layer:
+        final_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, output_chans)}
+        layers.append(norm_fn(nfeatures=input_chans, **final_gn_groups))
+
+    return nn.Sequential(*layers)
+
+
+def _build_conv_decoder(input_chans, output_shape,
+                        layer_fn=nn.ConvTranspose2d,
+                        base_channels=1024,
+                        channel_multiplier=0.5,
+                        kernels=[4, 4, 3, 3, 3],
+                        strides=[2, 1, 2, 1, 1],
+                        activation_str="relu",
+                        normalization_str="none",
+                        norm_first_layer=False,
+                        norm_last_layer=False,
+                        **kwargs):
+    """ Helper to build an arbitrary convolutional decoder.
+
+    :param input_chans: number of input channels
+    :param output_shape: [C, H, W] output shape
+    :param layer_fn: what layer function to use?
+    :param base_channels: base feature maps
+    :param channel_multiplier: expand by this per layer, usually < 1
+    :param kernels: list of kernels per layer
+    :param strides: list of strides for each layer
+    :param activation_str: what activation function to use
+    :param normalization_str: layer normalization type, eg: batchnorm
+    :param norm_first_layer: apply normalization to the input layer?
+    :param norm_last_layer: apply normalization to the final layer?
+    :returns: a model with a bunch of conv layers.
+    :rtype: nn.Sequential
+
+    """
+    # Normalization and activation helpers
+    norm_fn = functools.partial(
+        add_normalization, normalization_str=normalization_str, ndims=2)
+    activation_fn = str_to_activ_module(activation_str)
+    layers = []
+
+    if norm_first_layer:
+        init_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, input_chans)}
+        layers.append(norm_fn(Identity(), nfeatures=input_chans, **init_gn_groups))
+        # layers.append(activation_fn())  # TODO(jramapuram): consider this.
+
+    # build the initial layer
+    # init_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, base_channels)}
+    # layers.append(norm_fn(layer_fn(input_chans, base_channels, kernel_size=kernels[0], stride=strides[0]),
+    #                       nfeatures=base_channels, **init_gn_groups))
+    # # layers.append(Attention(base_channels, SNConv2d))
+    # layers.append(activation_fn())
+
+    # build the channel map.
+    channels = [input_chans, int(base_channels)]
+    for i in range(len(kernels) - 2):  # -2 because last one is output_shape[1] and first is input_chans
+        channels.append(int(channel_multiplier*channels[-1]))
+
+    print('channels = ', channels)
+    print('channels = {} | kernels = {} | strides = {}'.format(len(channels), len(kernels), len(strides)))
+    print(len(channels[1:]), len(channels[0:-1]))
+
+    # build each individual layer
+    # for k, s, chan_in, chan_out in zip(kernels[1:-1], strides[1:-1], channels[0:-1], channels[1:]):
+    for k, s, chan_in, chan_out in zip(kernels[0:-1], strides[0:-1], channels[0:-1], channels[1:]):
+        li_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, chan_out)}
+        layer_i = norm_fn(layer_fn(chan_in, chan_out, kernel_size=k, stride=s),
+                          nfeatures=chan_out, **li_gn_groups)
+        layers.append(layer_i)
+
+        # TODO(jramapuram): consider adding attention; works only with SNConv2d though
+        # layers.append(Attention(chan_out, SNConv2d))
+
+        layers.append(activation_fn())
+
+    # build the final layer
+    output_chans = output_shape[0]
+    print('output_chans = ', output_chans)
+    normalization_str = 'none' if norm_last_layer is False else normalization_str
+    final_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, output_chans)}
+    # layers.append(add_normalization(layer_fn(channels[-2], output_chans, kernel_size=kernels[-1], stride=strides[-1]),
+    layers.append(add_normalization(layer_fn(channels[-1], output_chans, kernel_size=kernels[-1], stride=strides[-1]),
+                                    normalization_str=normalization_str, ndims=2,
+                                    nfeatures=output_chans, **final_gn_groups))
+    print(layers[-1])
+
+    return nn.Sequential(*layers)
+
+
+def _build_conv_stack(input_chans, output_chans,
+                      layer_fn,
+                      base_channels,
+                      channel_multiplier,
+                      kernels,
+                      strides,
+                      activation_str="relu",
+                      normalization_str="none",
+                      norm_first_layer=False,
+                      norm_last_layer=False,
+                      **kwargs):
+    """ Helper to build an arbitrary convolutional decoder.
+
+    :param input_chans: number of input channels
+    :param output_shape: [C, H, W] output shape
+    :param layer_fn: what layer function to use?
+    :param base_channels: base feature maps
+    :param channel_multiplier: expand by this per layer, usually < 1
+    :param kernels: list of kernels per layer
+    :param strides: list of strides for each layer
+    :param activation_str: what activation function to use
+    :param normalization_str: layer normalization type, eg: batchnorm
+    :param norm_first_layer: apply normalization to the input layer?
+    :param norm_last_layer: apply normalization to the final layer?
+    :returns: a model with a bunch of conv layers.
+    :rtype: nn.Sequential
+
+    """
+    # Normalization and activation helpers
+    norm_fn = functools.partial(
+        add_normalization, normalization_str=normalization_str, ndims=2)
+    activation_fn = str_to_activ_module(activation_str)
+    layers = []
+
+    if norm_first_layer:
+        init_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, input_chans)}
+        layers.append(norm_fn(Identity(), nfeatures=input_chans, **init_gn_groups))
+        # layers.append(activation_fn())  # TODO(jramapuram): consider this.
+
+    # build the channel map.
+    channels = [input_chans, int(base_channels)]
+    for i in range(len(kernels) - 2):  # -2 because last one is output_shape[1] and first is input_chans
+        channels.append(int(channel_multiplier*channels[-1]))
+
+    print('channels = ', channels)
+    print('channels = {} | kernels = {} | strides = {}'.format(len(channels), len(kernels), len(strides)))
+    print(len(channels[1:]), len(channels[0:-1]))
+
+    # build each individual layer
+    # for k, s, chan_in, chan_out in zip(kernels[1:-1], strides[1:-1], channels[0:-1], channels[1:]):
+    for k, s, chan_in, chan_out in zip(kernels[0:-1], strides[0:-1], channels[0:-1], channels[1:]):
+        li_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, chan_out)}
+        layer_i = norm_fn(layer_fn(chan_in, chan_out, kernel_size=k, stride=s),
+                          nfeatures=chan_out, **li_gn_groups)
+        layers.append(layer_i)
+
+        # TODO(jramapuram): consider adding attention; works only with SNConv2d though
+        # layers.append(Attention(chan_out, SNConv2d))
+
+        layers.append(activation_fn())
+
+    # build the final layer
+    #output_chans = output_shape[0]
+    normalization_str = 'none' if norm_last_layer is False else normalization_str
+    final_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, output_chans)}
+    # layers.append(add_normalization(layer_fn(channels[-2], output_chans, kernel_size=kernels[-1], stride=strides[-1]),
+    layers.append(add_normalization(layer_fn(channels[-1], output_chans, kernel_size=kernels[-1], stride=strides[-1]),
+                                    normalization_str=normalization_str, ndims=2,
+                                    nfeatures=output_chans, **final_gn_groups))
+    return nn.Sequential(*layers)
+
+
+def proj(x, y):
+    """Projection of x onto y.
+
+       From https://github.com/ajbrock/BigGAN-PyTorch/
+    """
+    return torch.mm(y, x.t()) * y / torch.mm(y, y.t())
+
+
+def gram_schmidt(x, ys):
+    """Orthogonalize x wrt list of vectors ys.
+
+       From https://github.com/ajbrock/BigGAN-PyTorch/
+    """
+    for y in ys:
+        x = x - proj(x, y)
+
+    return x
+
+
+def power_iteration(W, u_, update=True, eps=1e-12):
+    """Apply num_itrs steps of the power method to estimate top N singular values."""
+    # Lists holding singular vectors and values
+    us, vs, svs = [], [], []
+    for i, u in enumerate(u_):
+        # Run one step of the power iteration
+        with torch.no_grad():
+            v = torch.matmul(u, W)
+
+            # Run Gram-Schmidt to subtract components of all other singular vectors
+            v = F.normalize(gram_schmidt(v, vs), eps=eps)
+
+            # Add to the list
+            vs += [v]
+
+            # Update the other singular vector
+            u = torch.matmul(v, W.t())
+
+            # Run Gram-Schmidt to subtract components of all other singular vectors
+            u = F.normalize(gram_schmidt(u, us), eps=eps)
+
+            # Add to the list
+            us += [u]
+
+            if update:
+                u_[i][:] = u
+
+        # Compute this singular value and add it to the list
+        svs += [torch.squeeze(torch.matmul(torch.matmul(v, W.t()), u.t()))]
+
+    return svs, us, vs
+
+
+class SN(object):
+    """Spectral normalization base class.
+
+       From https://github.com/ajbrock/BigGAN-PyTorch/
+    """
+
+    def __init__(self, num_svs, num_itrs, num_outputs, transpose=False, eps=1e-12):
+        # Number of power iterations per step
+        self.num_itrs = num_itrs
+
+        # Number of singular values
+        self.num_svs = num_svs
+
+        # Transposed?
+        self.transpose = transpose
+
+        # Epsilon value for avoiding divide-by-0
+        self.eps = eps
+
+        # Register a singular vector for each sv
+        for i in range(self.num_svs):
+            self.register_buffer('u%d' % i, torch.randn(1, num_outputs))
+            self.register_buffer('sv%d' % i, torch.ones(1))
+
+    @property
+    def u(self):
+        """Singular vectors (u side)."""
+        return [getattr(self, 'u%d' % i) for i in range(self.num_svs)]
+
+    @property
+    def sv(self):
+        """Singular values;note that these buffers are just for logging and are not used in training."""
+        return [getattr(self, 'sv%d' % i) for i in range(self.num_svs)]
+
+    def W_(self):
+        """Compute the spectrally-normalized weight."""
+        W_mat = self.weight.view(self.weight.size(0), -1)
+        if self.transpose:
+            W_mat = W_mat.t()
+
+        # Apply num_itrs power iterations
+        for _ in range(self.num_itrs):
+            svs, us, vs = power_iteration(W_mat, self.u, update=self.training, eps=self.eps)
+
+        # Update the svs
+        if self.training:
+            with torch.no_grad():  # Make sure to do this in a no_grad() context or you'll get memory leaks!
+                for i, sv in enumerate(svs):
+                    self.sv[i][:] = sv
+
+        return self.weight / svs[0]
+
+
+class SNConv2d(nn.Conv2d, SN):
+    """2D Conv layer with spectral norm,
+
+
+       From https://github.com/ajbrock/BigGAN-PyTorch/
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                 padding=0, dilation=1, groups=1, bias=True,
+                 num_svs=1, num_itrs=1, eps=1e-12):
+        nn.Conv2d.__init__(self, in_channels, out_channels, kernel_size, stride,
+                           padding, dilation, groups, bias)
+        SN.__init__(self, num_svs, num_itrs, out_channels, eps=eps)
+
+    def forward(self, x):
+        return F.conv2d(x, self.W_(), self.bias, self.stride,
+                        self.padding, self.dilation, self.groups)
+
+
+class Attention(nn.Module):
+    def __init__(self, ch, conv_fn=SNConv2d):
+        """Attention from SAGAN with modification from BigGAN.
+
+           From https://github.com/ajbrock/BigGAN-PyTorch/
+
+        :param ch: inputs channels
+        :param conv_fn: what type of convolution to use
+        :returns: Attention module
+        :rtype: nn.Module
+
+        """
+
+        super(Attention, self).__init__()
+
+        # Channel multiplier
+        self.ch = ch
+        self.which_conv = conv_fn
+        self.theta = self.which_conv(self.ch, self.ch // 8, kernel_size=1, padding=0, bias=False)
+        self.phi = self.which_conv(self.ch, self.ch // 8, kernel_size=1, padding=0, bias=False)
+        self.g = self.which_conv(self.ch, self.ch // 2, kernel_size=1, padding=0, bias=False)
+        self.o = self.which_conv(self.ch // 2, self.ch, kernel_size=1, padding=0, bias=False)
+
+        # Learnable gain parameter
+        self.gamma = nn.Parameter(torch.tensor(0.), requires_grad=True)
+
+    def forward(self, x, y=None):
+        # Apply convs
+        theta = self.theta(x)
+        phi = F.max_pool2d(self.phi(x), [2, 2])
+        g = F.max_pool2d(self.g(x), [2, 2])
+
+        # Perform reshapes
+        theta = theta.view(-1, self. ch // 8, x.shape[2] * x.shape[3])
+        phi = phi.view(-1, self. ch // 8, x.shape[2] * x.shape[3] // 4)
+        g = g.view(-1, self. ch // 2, x.shape[2] * x.shape[3] // 4)
+
+        # Matmul and softmax to get attention maps
+        beta = F.softmax(torch.bmm(theta.transpose(1, 2), phi), -1)
+
+        # Attention map times g path
+        o = self.o(torch.bmm(g, beta.transpose(1, 2)).view(-1, self.ch // 2, x.shape[2], x.shape[3]))
+        return self.gamma * o + x
+
+
+class Conv32UpsampleDecoder(nn.Module):
+    def __init__(self, input_chans, output_shape, base_channels=1024, channel_multiplier=0.5,
+                 activation_str="relu", normalization_str="none", norm_first_layer=True,
+                 norm_last_layer=False, layer_fn=UpsampleConvLayer):
+        super(Conv32UpsampleDecoder, self).__init__()
+        assert isinstance(input_chans, (float, int)), "Expect input_size as float or int."
+        assert len(output_shape) == 3, "Expect output_shape as [C, H, W]."
+
+        # Handle pre-decoder normalization
+        norm_layer = Identity()
+        if norm_first_layer:
+            norm_layer = add_normalization(norm_layer, normalization_str,
+                                           ndims=1, nfeatures=input_chans)
+
+        # Project to 4x4 first
+        self.mlp_proj = nn.Sequential(
+            View([-1, input_chans]),
+            norm_layer,
+            add_normalization(nn.Linear(input_chans, input_chans*4*4),
+                              normalization_str, ndims=1, nfeatures=input_chans*4*4),
+            str_to_activ_module(activation_str)(),
+            View([-1, input_chans, 4, 4]),
         )
 
-    # build the second to N-1 layers
-    strides = [2 if i % 2 == 0 else 1 for i in range(num_layers)]
-    intermediary_layers = [
-        _make_layer(filter_depth*(2**i), filter_depth*(2**j), stride=s) for i, j, s in zip(range(0, num_layers),
-                                                                                           range(1, num_layers+1),
-                                                                                           strides)
-    ]
+        # The main model
+        self.model = _build_conv_decoder(input_chans=input_chans,
+                                         output_shape=output_shape,
+                                         layer_fn=layer_fn,
+                                         base_channels=base_channels,
+                                         channel_multiplier=channel_multiplier,
+                                         kernels=[3, 3, 3],
+                                         strides=[1, 1, 1],
+                                         activation_str=activation_str,
+                                         normalization_str=normalization_str,
+                                         norm_first_layer=False,  # Handled already
+                                         norm_last_layer=norm_last_layer)
 
-    # compute groups
-    num_init_groups = max(int(min(np.ceil(filter_depth / 2), 32)), 1)
-    num_final_groups = max(int(min(np.ceil(filter_depth*(2**num_layers) / 2), 32)), 1)
+    def forward(self, images, upsample_last=False):
+        """Iterate over each of the layers to produce an output."""
+        if len(images.shape) == 2:
+            images = images.view(*images.shape, 1, 1)
 
-    # build the main model
-    return nn.Sequential(
-        upsampler if list(input_shape[1:]) != list(bilinear_size) else Identity(),
-        # input dim: num_channels x 32 x 32
-        add_normalization(layer_type(chans, filter_depth, 5, stride=1, groups=groups),
-                          normalization_str, 2, filter_depth, num_groups=num_init_groups),
-        activation_fn(),
+        outputs = self.mlp_proj(images)
+        outputs = self.model(outputs)
 
-        # add dynamic intermediary layers
-        *intermediary_layers,
+        if upsample_last:
+            return F.upsample(outputs, size=outputs.shape[-2:],
+                              mode='bilinear',
+                              align_corners=True)
 
-        # state dim: 512 x 1 x 1
-        add_normalization(layer_type(filter_depth*(2**num_layers), filter_depth*(2**num_layers), 1, stride=1 if bilinear_size[0]==32 else 3, groups=groups),
-                          normalization_str, 2, filter_depth*(2**num_layers), num_groups=num_final_groups),
-        activation_fn(),
-
-        # state dim: 512 x 1 x 1
-        layer_type(filter_depth*(2**num_layers), output_size, 1, stride=1, groups=groups),
-
-        # output dim: opt.z_dim x 1 x 1
-        Squeeze()
-    )
-
-def _build_conv_decoder(input_size, output_shape, layer_type=nn.ConvTranspose2d,
-                        filter_depth=32, activation_fn=nn.SELU, num_layers=3,
-                        normalization_str='none', reupsample=True, **kwargs):
-    '''Conv/FC --> BN --> Activ --> Dropout'''
-    chans = output_shape[0]
-    groups = kwargs.get('groups', 1) # batch groups
-
-    if reupsample:
-        bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
-        upsampler = Upsample(size=output_shape[1:], mode='bilinear', align_corners=True)
-
-    def _make_layer(input_size, filter_depth, kernel_size=4, stride=1):
-        gn_groups = _compute_group_norm_planes(normalization_str, filter_depth)
-        return nn.Sequential(
-            add_normalization(layer_type(input_size, filter_depth, kernel_size, stride, groups=groups),
-                              normalization_str, 2, filter_depth, num_groups=gn_groups),
-            activation_fn()
-        )
-
-    # build the second to N-1 layers
-    strides = [2 if i % 2 == 0 else 1 for i in range(num_layers)]
-    intermediary_layers = [
-        _make_layer(
-            filter_depth*(2**i), filter_depth*(2**j), stride=s) for i, j, s in zip(range(num_layers, -1, -1),
-                                                                                   range(num_layers-1, -1, -1),
-                                                                                   strides)
-    ]
-
-    # gn stats
-    num_init_groups = max(int(min(np.ceil(filter_depth*(2**num_layers) / 2), 32)), 1)
-    num_final_groups = max(int(min(np.ceil(filter_depth / 2), 32)), 1)
-
-    # a flattening / reshape layer
-    view_init_layer = Identity() if kwargs.get('disable_flatten', False) else  View([-1, input_size, 1, 1])
-    final_layer = nn.Conv2d if groups == 1 else BatchConv2D
-
-    return nn.Sequential(
-        view_init_layer,
-        # input dim: z_dim x 1 x 1
-        add_normalization(layer_type(input_size, filter_depth*(2**num_layers), 4, stride=1, bias=True, groups=groups),
-                          normalization_str, 2, filter_depth*(2**num_layers), num_groups=num_init_groups),
-        activation_fn(),
-
-        # add intermediary layers
-        *intermediary_layers,
-
-        # state dim: 32 x 28 x 28
-        add_normalization(layer_type(filter_depth, filter_depth, 5, stride=1, groups=groups),
-                          normalization_str, 2, filter_depth, num_groups=num_final_groups),
-        activation_fn(),
-
-        # state dim: 32 x 32 x 32
-        final_layer(filter_depth, chans, 1, stride=1, bias=True, groups=groups),
-        # output dim: num_channels x 32 x 32
-        upsampler if reupsample else Identity()
-    )
+        return outputs
 
 
-def _build_resnet_decoder(input_size, output_shape, layer_type=ResnetDeconvBlock.deconv3x3,
-                          filter_depth=32, activation_fn=nn.SELU, num_layers=3,
-                          normalization_str='none', reupsample=True, **kwargs):
-    '''Conv/FC --> BN --> Activ --> Dropout'''
-    chans = output_shape[0]
-    if reupsample:
-        bilinear_size = (32, 32) if 'bilinear_size' not in kwargs else kwargs['bilinear_size']
-        upsampler = Upsample(size=output_shape[1:], mode='bilinear', align_corners=True)
+class Conv32Decoder(nn.Module):
+    def __init__(self, input_chans, output_shape, base_channels=1024, channel_multiplier=0.5,
+                 activation_str="relu", normalization_str="none", norm_first_layer=False,
+                 norm_last_layer=False, layer_fn=nn.ConvTranspose2d):
+        super(Conv32Decoder, self).__init__()
+        assert isinstance(input_chans, (float, int)), "Expect input_size as float or int."
+        assert len(output_shape) == 3, "Expect output_shape as [C, H, W]."
 
-    def _make_layer(input_chans, filter_depth, upsample, stride=1):
-        return ResnetDeconvBlock(input_chans, filter_depth, stride=stride,
-                                 upsample=upsample, layer_type=layer_type,
-                                 normalization_str=normalization_str,
-                                 activation_fn=activation_fn)
+        # The main model
+        self.model = _build_conv_stack(input_chans=input_chans,
+                                       output_chans=output_shape[0],
+                                       layer_fn=layer_fn,
+                                       base_channels=base_channels,
+                                       channel_multiplier=channel_multiplier,
+                                       kernels=[5, 4, 4, 4],  # NEW ver
+                                       strides=[1, 2, 1, 2],  # NEW ver
+                                       # kernels=[5, 1, 4, 1, 4, 1, 4, 1],  # NEW small ver
+                                       # strides=[1, 1, 2, 1, 1, 1, 2, 1],  # NEW small ver
+                                       # kernels=[5, 4, 4, 4, 4, 1, 1],  # OLD ver
+                                       # strides=[1, 2, 1, 2, 1, 1, 1],  # OLD ver
+                                       activation_str=activation_str,
+                                       normalization_str=normalization_str,
+                                       norm_first_layer=norm_first_layer,
+                                       norm_last_layer=norm_last_layer)
+        # self.model = _build_conv_decoder(input_chans=input_chans,
+        #                                  output_shape=output_shape,
+        #                                  layer_fn=layer_fn,
+        #                                  base_channels=base_channels,
+        #                                  channel_multiplier=channel_multiplier,
+        #                                  kernels=[5, 4, 4, 4],  # NEW ver
+        #                                  strides=[1, 2, 1, 2],  # NEW ver
+        #                                  # kernels=[5, 1, 4, 1, 4, 1, 4, 1],  # NEW small ver
+        #                                  # strides=[1, 1, 2, 1, 1, 1, 2, 1],  # NEW small ver
+        #                                  # kernels=[5, 4, 4, 4, 4, 1, 1],  # OLD ver
+        #                                  # strides=[1, 2, 1, 2, 1, 1, 1],  # OLD ver
+        #                                  activation_str=activation_str,
+        #                                  normalization_str=normalization_str,
+        #                                  norm_first_layer=norm_first_layer,
+        #                                  norm_last_layer=norm_last_layer)
 
-    # build the second to N-1 layers
-    strides = [2 if i % 2 == 0 else 1 for i in range(num_layers)]
-    upsamples = [True if i % 2 == 0 else False for i in range(num_layers)]
-    intermediary_layers = [
-        _make_layer(filter_depth*(2**i), filter_depth*(2**j), upsample=u ,stride=s) for i, j, s, u in zip(range(num_layers, -1, -1),
-                                                                                                          range(num_layers-1, -1, -1),
-                                                                                                          strides,
-                                                                                                          upsamples)
-    ]
+    def forward(self, images, upsample_last=True):
+        """Iterate over each of the layers to produce an output."""
+        if len(images.shape) == 2:
+            images = images.view(*images.shape, 1, 1)
 
-    return nn.Sequential(
-        View([-1, input_size, 1, 1]),
-        # input dim: z_dim x 1 x 1
-        _make_layer(input_size, filter_depth*(2**num_layers), upsample=False, stride=1),
+        outputs = self.model(images)
+        if upsample_last:
+            return F.upsample(outputs, size=(32, 32),
+                              mode='bilinear',
+                              align_corners=True)
 
-        # add intermediary layers
-        *intermediary_layers,
-
-        # state dim: 32 x 28 x 28
-        _make_layer(filter_depth, filter_depth, upsample=False, stride=1),
-
-        # state dim: 32 x 32 x 32
-        nn.Conv2d(filter_depth, chans, 1, stride=1, bias=True),
-
-        # output dim: num_channels x 32 x 32
-        upsampler if reupsample else Identity()
-    )
-
-
-def build_gated_conv_decoder(input_size, output_shape, filter_depth=32,
-                             activation_fn=Identity, num_layers=3,
-                             normalization_str="none", reupsample=True, **kwargs):
-    ''' helper that calls the builder function with GatedConvTranspose2d'''
-    layer_type = functools.partial(GatedConv2d, layer_type=nn.ConvTranspose2d)
-    return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
-                               filter_depth=filter_depth, activation_fn=activation_fn,
-                               num_layers=num_layers, normalization_str=normalization_str,
-                               reupsample=reupsample, layer_type=layer_type, **kwargs)
-
-
-def build_gated_coord_conv_decoder(input_size, output_shape, filter_depth=32,
-                                   activation_fn=Identity, num_layers=3,
-                                   normalization_str="none", reupsample=True, **kwargs):
-    ''' helper that calls the builder function with GatedCoordConv'''
-    layer_type = functools.partial(GatedConv2d, layer_type=CoordConvTranspose)
-    return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
-                               filter_depth=filter_depth, activation_fn=activation_fn,
-                               num_layers=num_layers, normalization_str=normalization_str,
-                               reupsample=reupsample, layer_type=layer_type, **kwargs)
+        return outputs
 
 
-def build_coord_conv_decoder(input_size, output_shape, filter_depth=32,
-                             activation_fn=Identity, num_layers=3,
-                             normalization_str="none", reupsample=True, **kwargs):
-    ''' helper that calls the builder function with CoordConvTranspose'''
-    return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
-                               filter_depth=filter_depth, activation_fn=activation_fn,
-                               num_layers=num_layers, normalization_str=normalization_str,
-                               reupsample=reupsample, layer_type=CoordConvTranspose, **kwargs)
+class Conv64Decoder(nn.Module):
+    def __init__(self, input_chans, output_shape, base_channels=1024, channel_multiplier=0.5,
+                 activation_str="relu", normalization_str="none", norm_first_layer=True,
+                 norm_last_layer=False, layer_fn=nn.ConvTranspose2d):
+        super(Conv64Decoder, self).__init__()
+        assert isinstance(input_chans, (float, int)), "Expect input_size as float or int."
+        assert len(output_shape) == 3, "Expect output_shape as [C, H, W]."
+
+        # The main model
+        self.model = _build_conv_decoder(input_chans=input_chans,
+                                         output_shape=output_shape,
+                                         layer_fn=layer_fn,
+                                         base_channels=base_channels,
+                                         channel_multiplier=channel_multiplier,
+                                         kernels=[7, 5, 5, 5, 4, 4, 2],
+                                         strides=[2, 1, 2, 1, 2, 1, 1],
+                                         activation_str=activation_str,
+                                         normalization_str=normalization_str,
+                                         norm_first_layer=norm_first_layer,
+                                         norm_last_layer=norm_last_layer)
+
+    def forward(self, images):
+        """Iterate over each of the layers to produce an output."""
+        if len(images.shape) == 2:
+            images = images.view(*images.shape, 1, 1)
+
+        return self.model(images)
 
 
-def build_conv_decoder(input_size, output_shape, filter_depth=32,
-                       activation_fn=nn.SELU, num_layers=3, normalization_str='none',
-                       reupsample=True, **kwargs):
-    ''' helper that calls the builder function with nn.ConvTranspose2d'''
-    return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
-                               filter_depth=filter_depth, activation_fn=activation_fn,
-                               num_layers=num_layers, normalization_str=normalization_str,
-                               reupsample=reupsample, layer_type=nn.ConvTranspose2d, **kwargs)
+class Conv128Decoder(nn.Module):
+    def __init__(self, input_chans, output_shape, base_channels=1024, channel_multiplier=0.5,
+                 activation_str="relu", normalization_str="none", norm_first_layer=True,
+                 norm_last_layer=False, layer_fn=nn.ConvTranspose2d):
+        super(Conv128Decoder, self).__init__()
+        assert isinstance(input_chans, (float, int)), "Expect input_size as float or int."
+        assert len(output_shape) == 3, "Expect output_shape as [C, H, W]."
 
-# batch versions
-def build_batch_gated_conv_decoder(input_size, output_shape, filter_depth=32,
-                             activation_fn=Identity, num_layers=3,
-                             normalization_str="none", reupsample=True, **kwargs):
-    ''' helper that calls the builder function with GatedConvTranspose2d'''
-    layer_type = functools.partial(GatedConv2d, layer_type=BatchConvTranspose2D)
-    return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
-                               filter_depth=filter_depth, activation_fn=activation_fn,
-                               num_layers=num_layers, normalization_str=normalization_str,
-                               reupsample=reupsample, layer_type=layer_type, **kwargs)
+        # The main model
+        self.model = _build_conv_decoder(input_chans=input_chans,
+                                         output_shape=output_shape,
+                                         layer_fn=layer_fn,
+                                         base_channels=base_channels,
+                                         channel_multiplier=channel_multiplier,
+                                         kernels=[7, 7, 7, 7, 7, 5, 4, 3, 3],
+                                         strides=[2, 2, 1, 2, 1, 2, 1, 1, 1],
+                                         activation_str=activation_str,
+                                         normalization_str=normalization_str,
+                                         norm_first_layer=norm_first_layer,
+                                         norm_last_layer=norm_last_layer)
 
-def build_batch_conv_decoder(input_size, output_shape, filter_depth=32,
-                             activation_fn=nn.SELU, num_layers=3, normalization_str='none',
-                             reupsample=True, **kwargs):
-    ''' helper that calls the builder function with nn.ConvTranspose2d'''
-    return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
-                               filter_depth=filter_depth, activation_fn=activation_fn,
-                               num_layers=num_layers, normalization_str=normalization_str,
-                               reupsample=reupsample, layer_type=BatchConvTranspose2D, **kwargs)
+    def forward(self, images):
+        """Iterate over each of the layers to produce an output."""
+        if len(images.shape) == 2:
+            images = images.view(*images.shape, 1, 1)
+
+        return self.model(images)
+
+
+def _build_conv_encoder(input_chans, output_size,
+                        layer_fn=nn.Conv2d,
+                        base_channels=64,
+                        channel_multiplier=2,
+                        kernels=[4, 4, 3, 3, 3],
+                        strides=[2, 1, 2, 1, 1],
+                        activation_str="relu",
+                        normalization_str="none",
+                        norm_last_layer=False,
+                        **kwargs):
+    """ Helper to build an arbitrary convolutional encoder.
+
+    :param input_chans: number of input channels
+    :param output_size: number of output channels
+    :param layer_fn: what layer function to use?
+    :param base_channels: base feature maps
+    :param channel_multiplier: expand by this per layer
+    :param kernels: list of kernels per layer
+    :param strides: list of strides for each layer
+    :param activation_str: what activation function to use
+    :param normalization_str: layer normalization type, eg: batchnorm
+    :param norm_last_layer: apply normalization to the final layer?
+    :returns: a model with a bunch of conv layers.
+    :rtype: nn.Sequential
+
+    """
+    # Normalization and activation helpers
+    norm_fn = functools.partial(
+        add_normalization, normalization_str=normalization_str, ndims=2)
+    activation_fn = str_to_activ_module(activation_str)
+    layers = []
+
+    # build the initial layer
+    # init_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, base_channels)}
+    # layers = [norm_fn(layer_fn(input_chans, base_channels, kernel_size=kernels[0], stride=strides[0]),
+    #                   nfeatures=base_channels, **init_gn_groups)]
+    # layers.append(activation_fn())
+
+    # build the channel map.
+    channels = [input_chans, base_channels]
+    for i in range(len(kernels) - 2):  # -2 because last one is output_size
+        channels.append(channel_multiplier*channels[-1])
+
+    # build the rest of the layers, from 1 --> end
+    # for k, s, chan_in, chan_out in zip(kernels[1:-1], strides[1:-1], channels[0:-1], channels[1:]):
+    for k, s, chan_in, chan_out in zip(kernels[0:-1], strides[0:-1], channels[0:-1], channels[1:]):
+        li_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, chan_out)}
+        layer_i = norm_fn(layer_fn(chan_in, chan_out, kernel_size=k, stride=s),
+                          nfeatures=chan_out, **li_gn_groups)
+        layers.append(layer_i)
+        layers.append(activation_fn())
+
+    # build the final layer
+    normalization_str = 'none' if norm_last_layer is False else normalization_str
+    final_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, output_size)}
+    #layers.append(add_normalization(layer_fn(channels[-2], output_size, kernel_size=kernels[-1], stride=strides[-1]),
+    layers.append(add_normalization(layer_fn(channels[-1], output_size, kernel_size=kernels[-1], stride=strides[-1]),
+                                    normalization_str=normalization_str, ndims=2,
+                                    nfeatures=output_size, **final_gn_groups))
+
+    return nn.Sequential(*layers)
+
+
+class Conv32Encoder(nn.Module):
+    def __init__(self, input_chans, output_size, base_channels=32, channel_multiplier=2,
+                 activation_str="relu", normalization_str="none", norm_last_layer=False,
+                 layer_fn=nn.Conv2d):
+        super(Conv32Encoder, self).__init__()
+        assert isinstance(output_size, (float, int)), "Expect output_size as float or int."
+
+        # The main model
+        self.model = _build_conv_stack(input_chans=input_chans,
+                                       output_chans=output_size,
+                                       layer_fn=layer_fn,
+                                       base_channels=base_channels,
+                                       channel_multiplier=channel_multiplier,
+                                       # TODO(jramapuram): consider this
+                                       # kernels=[3, 4, 4, 3, 3, 3],
+                                       # strides=[1, 2, 1, 2, 1, 1],
+                                       kernels=[4, 4, 3, 3, 3],
+                                       strides=[2, 1, 2, 1, 1],
+                                       activation_str=activation_str,
+                                       normalization_str=normalization_str,
+                                       norm_first_layer=False,  # dont norm inputs
+                                       norm_last_layer=norm_last_layer)
+
+        # self.model = _build_conv_encoder(input_chans=input_chans,
+        #                                  output_size=output_size,
+        #                                  layer_fn=layer_fn,
+        #                                  base_channels=base_channels,
+        #                                  channel_multiplier=channel_multiplier,
+        #                                  # TODO(jramapuram): consider this
+        #                                  # kernels=[3, 4, 4, 3, 3, 3],
+        #                                  # strides=[1, 2, 1, 2, 1, 1],
+        #                                  kernels=[4, 4, 3, 3, 3],
+        #                                  strides=[2, 1, 2, 1, 1],
+        #                                  activation_str=activation_str,
+        #                                  normalization_str=normalization_str,
+        #                                  norm_last_layer=norm_last_layer)
+
+    def forward(self, images):
+        """Iterate over each of the layers to produce an output."""
+        assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
+        return self.model(images)
+
+
+class Conv64Encoder(nn.Module):
+    def __init__(self, input_chans, output_size, base_channels=32, channel_multiplier=2,
+                 activation_str="relu", normalization_str="none", norm_last_layer=False,
+                 layer_fn=nn.Conv2d):
+        super(Conv64Encoder, self).__init__()
+        assert isinstance(output_size, (float, int)), "Expect output_size as float or int."
+
+        # The main model
+        self.model = _build_conv_encoder(input_chans=input_chans,
+                                         output_size=output_size,
+                                         layer_fn=layer_fn,
+                                         base_channels=base_channels,
+                                         channel_multiplier=channel_multiplier,
+                                         kernels=[5, 4, 4, 3, 3, 3, 2],
+                                         strides=[2, 1, 2, 1, 2, 1, 1],
+                                         activation_str=activation_str,
+                                         normalization_str=normalization_str,
+                                         norm_last_layer=norm_last_layer)
+
+    def forward(self, images):
+        """Iterate over each of the layers to produce an output."""
+        assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
+        return self.model(images)
+
+
+class Conv128Encoder(nn.Module):
+    def __init__(self, input_chans, output_size, base_channels=32, channel_multiplier=2,
+                 activation_str="relu", normalization_str="none", norm_last_layer=False,
+                 layer_fn=nn.Conv2d):
+        super(Conv128Encoder, self).__init__()
+        assert isinstance(output_size, (float, int)), "Expect output_size as float or int."
+
+        # The main model
+        self.model = _build_conv_encoder(input_chans=input_chans,
+                                         output_size=output_size,
+                                         layer_fn=layer_fn,
+                                         base_channels=base_channels,
+                                         channel_multiplier=channel_multiplier,
+                                         kernels=[7, 5, 4, 4, 3, 3, 3, 2],
+                                         strides=[2, 2, 1, 2, 1, 2, 1, 1],
+                                         activation_str=activation_str,
+                                         normalization_str=normalization_str,
+                                         norm_last_layer=norm_last_layer)
+
+    def forward(self, images):
+        """Iterate over each of the layers to produce an output."""
+        assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
+        return self.model(images)
+
+
+# def build_gated_conv_decoder(input_size, output_shape, filter_depth=32,
+#                              activation_fn=Identity, num_layers=3,
+#                              normalization_str="none", reupsample=True, **kwargs):
+#     ''' helper that calls the builder function with GatedConvTranspose2d'''
+#     layer_type = functools.partial(GatedConv2d, layer_type=nn.ConvTranspose2d)
+#     return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
+#                                filter_depth=filter_depth, activation_fn=activation_fn,
+#                                num_layers=num_layers, normalization_str=normalization_str,
+#                                reupsample=reupsample, layer_type=layer_type, **kwargs)
+
+
+# def build_gated_coord_conv_decoder(input_size, output_shape, filter_depth=32,
+#                                    activation_fn=Identity, num_layers=3,
+#                                    normalization_str="none", reupsample=True, **kwargs):
+#     ''' helper that calls the builder function with GatedCoordConv'''
+#     layer_type = functools.partial(GatedConv2d, layer_type=CoordConvTranspose)
+#     return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
+#                                filter_depth=filter_depth, activation_fn=activation_fn,
+#                                num_layers=num_layers, normalization_str=normalization_str,
+#                                reupsample=reupsample, layer_type=layer_type, **kwargs)
+
+
+# def build_coord_conv_decoder(input_size, output_shape, filter_depth=32,
+#                              activation_fn=Identity, num_layers=3,
+#                              normalization_str="none", reupsample=True, **kwargs):
+#     ''' helper that calls the builder function with CoordConvTranspose'''
+#     return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
+#                                filter_depth=filter_depth, activation_fn=activation_fn,
+#                                num_layers=num_layers, normalization_str=normalization_str,
+#                                reupsample=reupsample, layer_type=CoordConvTranspose, **kwargs)
+
+
+# def build_conv_decoder(input_size, output_shape, filter_depth=32,
+#                        activation_fn=nn.SELU, num_layers=3, normalization_str='none',
+#                        reupsample=True, **kwargs):
+#     ''' helper that calls the builder function with nn.ConvTranspose2d'''
+#     return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
+#                                filter_depth=filter_depth, activation_fn=activation_fn,
+#                                num_layers=num_layers, normalization_str=normalization_str,
+#                                reupsample=reupsample, layer_type=nn.ConvTranspose2d, **kwargs)
+
+# # batch versions
+# def build_batch_gated_conv_decoder(input_size, output_shape, filter_depth=32,
+#                              activation_fn=Identity, num_layers=3,
+#                              normalization_str="none", reupsample=True, **kwargs):
+#     ''' helper that calls the builder function with GatedConvTranspose2d'''
+#     layer_type = functools.partial(GatedConv2d, layer_type=BatchConvTranspose2D)
+#     return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
+#                                filter_depth=filter_depth, activation_fn=activation_fn,
+#                                num_layers=num_layers, normalization_str=normalization_str,
+#                                reupsample=reupsample, layer_type=layer_type, **kwargs)
+
+# def build_batch_conv_decoder(input_size, output_shape, filter_depth=32,
+#                              activation_fn=nn.SELU, num_layers=3, normalization_str='none',
+#                              reupsample=True, **kwargs):
+#     ''' helper that calls the builder function with nn.ConvTranspose2d'''
+#     return _build_conv_decoder(input_size=input_size, output_shape=output_shape,
+#                                filter_depth=filter_depth, activation_fn=activation_fn,
+#                                num_layers=num_layers, normalization_str=normalization_str,
+#                                reupsample=reupsample, layer_type=BatchConvTranspose2D, **kwargs)
 
 
 def _build_dense(input_shape, output_shape, latent_size=512, num_layers=2,
@@ -1604,7 +2248,7 @@ def _build_dense(input_shape, output_shape, latent_size=512, num_layers=2,
                                        normalization_str, 1, latent_size, num_groups=32)),
               ('act0', activation_fn())]
 
-    for i in range(num_layers - 2): # 2 for init layer[above] + final layer[below]
+    for i in range(num_layers - 2):  # 2 for init layer[above] + final layer[below]
         layers.append(
             ('l{}'.format(i+1), add_normalization(layer(latent_size, latent_size),
                                                   normalization_str, 1, latent_size, num_groups=32))
@@ -1618,10 +2262,11 @@ def _build_dense(input_shape, output_shape, latent_size=512, num_layers=2,
 
 
 def build_dense_encoder(input_shape, output_size, latent_size=512, num_layers=2,
-                         activation_fn=nn.SELU, normalization_str="none", **kwargs):
+                        activation_fn=nn.SELU, normalization_str="none", **kwargs):
     ''' flatten --> layer + norm --> activation -->... --> Linear output --> view'''
     return _build_dense(input_shape, output_size, latent_size, num_layers,
                         activation_fn, normalization_str, layer=nn.Linear, **kwargs)
+
 
 def build_gated_dense_encoder(input_shape, output_size, latent_size=512, num_layers=2,
                               activation_fn=nn.SELU, normalization_str="none", **kwargs):
@@ -1644,203 +2289,284 @@ def build_dense_decoder(input_size, output_shape, latent_size=512, num_layers=3,
                         activation_fn, normalization_str, layer=nn.Linear, **kwargs)
 
 
-def _get_num_layers(layer_str, input_shape, is_encoder=True):
-    """ Internal helper to get layer sizing for images
-
-    :param layer_str: the string layer type
-    :param is_encoder: False if using a decoder
-    :returns: the number of layers for the given size
-    :rtype: int
-
-    """
-    if layer_str == 'dense':
-        # dense_layer_dict = {
-        #     256: 3, 128: 3, 64: 3, 32: 3, 28: 3
-        # }
-        # return [dense_layer_dict[input_size], input_size]
-        num_layers = 3
-        input_size = int(np.prod(input_shape))
-        return [num_layers, input_size]
-
-    largest_image_dim = max(input_shape[1], input_shape[2])
-    input_size = min([256, 128, 64, 32, 28], key=lambda x: abs(x - largest_image_dim))
-    num_layer_encoder_dict = {
-        'conv': {256: 9, 128: 7, 64: 5, 32: 4, 28: 3},
-        'batch_conv': {256: 9, 128: 7, 64: 5, 32: 4, 28: 3},
-        'coordconv': {256: 9, 128: 7, 64: 5, 32: 4, 28: 3},
-        'resnet': {256: 11, 128: 9, 64: 7, 32: 6, 28: 5}
+def get_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
+                encoder_layer_type: str = 'conv',
+                encoder_base_channels: int = 32,  # For conv models
+                encoder_channel_multiplier: int = 2,
+                latent_size: int = 512,   # For dense models
+                dense_normalization: str = 'none',
+                conv_normalization: str = 'none',
+                disable_gated: bool = True,
+                norm_last_layer: bool = False,
+                activation: str = 'relu',
+                name: str = 'encoder',
+                **unused_kwargs):
+    '''Helper to return the correct encoder function.'''
+    conv_encoder_size_dict = {
+        128: Conv128Encoder,
+        64: Conv64Encoder,
+        32: Conv32Encoder,
+        # TODO(jramapuram): add other sizing here.
     }
+    chans, image_size = input_shape[0], input_shape[-1]
 
-    # NOTE: decoder layer-sizing is approximate, over-estimates a little.
-    #       It needs to be coupled with an upsample, use reupsample=True
-    num_layer_decoder_dict = {
-        'conv': {256: 9, 128: 7, 64: 5, 32: 3, 28: 3},
-        'batch_conv': {256: 9, 128: 7, 64: 5, 32: 3, 28: 3},
-        'coordconv': {256: 9, 128: 7, 64: 5, 32: 3, 28: 3},
-        'resnet': {256: 9, 128: 7, 64: 5, 32: 3, 28: 3}
-    }
-    return [num_layer_encoder_dict[layer_str][input_size], input_size] if is_encoder \
-        else [num_layer_decoder_dict[layer_str][input_size], input_size]
-
-
-def get_encoder(config, name='encoder'):
-    ''' helper to return the correct encoder function from argparse'''
-    num_layers, determined_size = _get_num_layers(config['encoder_layer_type'], config['input_shape'])
     net_map = {
-        'relational': build_relational_conv_encoder,
-        'resnet': {
-            # True for gated, False for non-gated
-            True: functools.partial(_build_resnet_encoder,
-                                    layer_type=ResnetBlock.gated_conv3x3,
-                                    filter_depth=config['filter_depth'],
-                                    num_layers=num_layers,
-                                    bilinear_size=(determined_size, determined_size),
-                                    normalization_str=config['conv_normalization']),
-            False: functools.partial(_build_resnet_encoder,
-                                     layer_type=ResnetBlock.conv3x3,
-                                     filter_depth=config['filter_depth'],
-                                     num_layers=num_layers,
-                                     bilinear_size=(determined_size, determined_size),
-                                     normalization_str=config['conv_normalization'])
-        },
+        # 'resnet': {
+        #     # True for gated, False for non-gated
+        #     True: functools.partial(_build_resnet_encoder,
+        #                             layer_type=ResnetBlock.gated_conv3x3,
+        #                             filter_depth=config['filter_depth'],
+        #                             num_layers=num_layers,
+        #                             bilinear_size=(determined_size, determined_size),
+        #                             normalization_str=config['conv_normalization']),
+        #     False: functools.partial(_build_resnet_encoder,
+        #                              layer_type=ResnetBlock.conv3x3,
+        #                              filter_depth=config['filter_depth'],
+        #                              num_layers=num_layers,
+        #                              bilinear_size=(determined_size, determined_size),
+        #                              normalization_str=config['conv_normalization'])
+        # },
         'conv': {
-            # True for gated, False for non-gated
-            True: functools.partial(build_gated_conv_encoder,
-                                    filter_depth=config['filter_depth'],
-                                    num_layers=num_layers,
-                                    bilinear_size=(determined_size, determined_size),
-                                    normalization_str=config['conv_normalization']),
-            False: functools.partial(build_conv_encoder,
-                                     filter_depth=config['filter_depth'],
-                                     num_layers=num_layers,
-                                     bilinear_size=(determined_size, determined_size),
-                                     normalization_str=config['conv_normalization'])
+            True: functools.partial(conv_encoder_size_dict[image_size],
+                                    input_chans=chans,
+                                    base_channels=encoder_base_channels,
+                                    channel_multiplier=encoder_channel_multiplier,
+                                    normalization_str=conv_normalization,
+                                    norm_last_layer=norm_last_layer,
+                                    activation_str=activation,
+                                    layer_fn=GatedConv2d),
+            False: functools.partial(conv_encoder_size_dict[image_size],
+                                     input_chans=chans,
+                                     base_channels=encoder_base_channels,
+                                     channel_multiplier=encoder_channel_multiplier,
+                                     normalization_str=conv_normalization,
+                                     norm_last_layer=norm_last_layer,
+                                     activation_str=activation,
+                                     layer_fn=nn.Conv2d),
         },
         'batch_conv': {
-            # True for gated, False for non-gated
-            True: functools.partial(build_batch_gated_conv_encoder,
-                                    filter_depth=config['filter_depth'],
-                                    num_layers=num_layers,
-                                    bilinear_size=(determined_size, determined_size),
-                                    normalization_str=config['conv_normalization']),
-            False: functools.partial(build_batch_conv_encoder,
-                                     filter_depth=config['filter_depth'],
-                                     num_layers=num_layers,
-                                     bilinear_size=(determined_size, determined_size),
-                                     normalization_str=config['conv_normalization'])
+            True: functools.partial(conv_encoder_size_dict[image_size],
+                                    input_chans=chans,
+                                    base_channels=encoder_base_channels,
+                                    channel_multiplier=encoder_channel_multiplier,
+                                    normalization_str=conv_normalization,
+                                    norm_last_layer=norm_last_layer,
+                                    activation_str=activation,
+                                    layer_fn=functools.partial(GatedConv2d, layer_type=BatchConv2D)),
+            False: functools.partial(conv_encoder_size_dict[image_size],
+                                     input_chans=chans,
+                                     base_channels=encoder_base_channels,
+                                     channel_multiplier=encoder_channel_multiplier,
+                                     normalization_str=conv_normalization,
+                                     norm_last_layer=norm_last_layer,
+                                     activation_str=activation,
+                                     layer_fn=BatchConv2D),
         },
         'coordconv': {
-            # True for gated, False for non-gated
-            True: functools.partial(build_gated_coord_conv_encoder,
-                                    filter_depth=config['filter_depth'],
-                                    num_layers=num_layers,
-                                    bilinear_size=(determined_size, determined_size),
-                                    normalization_str=config['conv_normalization']),
-            False: functools.partial(build_coord_conv_encoder,
-                                     filter_depth=config['filter_depth'],
-                                     num_layers=num_layers,
-                                     bilinear_size=(determined_size, determined_size),
-                                     normalization_str=config['conv_normalization'])
+            True: functools.partial(conv_encoder_size_dict[image_size],
+                                    input_chans=chans,
+                                    base_channels=encoder_base_channels,
+                                    channel_multiplier=encoder_channel_multiplier,
+                                    normalization_str=conv_normalization,
+                                    norm_last_layer=norm_last_layer,
+                                    activation_str=activation,
+                                    layer_fn=functools.partial(GatedConv2d, layer_type=CoordConv)),
+            False: functools.partial(conv_encoder_size_dict[image_size],
+                                     input_chans=chans,
+                                     base_channels=encoder_base_channels,
+                                     channel_multiplier=encoder_channel_multiplier,
+                                     normalization_str=conv_normalization,
+                                     norm_last_layer=norm_last_layer,
+                                     activation_str=activation,
+                                     layer_fn=CoordConv),
         },
-        'dense': {
-            # True for gated, False for non-gated
-            True: functools.partial(build_gated_dense_encoder,
-                                    latent_size=config['latent_size'],
-                                    num_layers=num_layers,
-                                    bilinear_size=(determined_size, determined_size),
-                                    normalization_str=config['dense_normalization']),
-            False: functools.partial(build_dense_encoder,
-                                     latent_size=config['latent_size'],
-                                     num_layers=num_layers,
-                                     bilinear_size=(determined_size, determined_size),
-                                     normalization_str=config['dense_normalization'])
-        }
+        # 'dense': {
+        #     # True for gated, False for non-gated
+        #     True: functools.partial(build_gated_dense_encoder,
+        #                             latent_size=latent_size,
+        #                             num_layers=3,  # XXX(jramapuram): hardcoded
+        #                             bilinear_size=(determined_size, determined_size),
+        #                             normalization_str=dense_normalization),
+        #     False: functools.partial(build_dense_encoder,
+        #                              latent_size=latent_size,
+        #                              num_layers=3,
+        #                              bilinear_size=(determined_size, determined_size),
+        #                              normalization_str=dense_normalization)
+        # }
     }
 
-    fn = net_map[config['encoder_layer_type']][not config['disable_gated']]
+    fn = net_map[encoder_layer_type][not disable_gated]
     print("using {} {} for {}".format(
-        "gated" if not config['disable_gated'] else "standard",
-        config['encoder_layer_type'],
+        "gated" if not disable_gated else "standard",
+        encoder_layer_type,
         name
     ))
     return fn
 
 
-def get_decoder(config, reupsample=True, name='decoder'):
-    ''' helper to return the correct decoder function'''
-    num_layers, _ = _get_num_layers(config['decoder_layer_type'], config['input_shape'], is_encoder=False)
+def get_decoder(input_chans: int,                    # input size to decoder
+                output_shape: Tuple[int, int, int],  # output image shape [B, H, W]
+                decoder_layer_type: str = 'conv',
+                decoder_base_channels: int = 1024,      # For conv models
+                decoder_channel_multiplier: int = 0.5,  # Decoding shrinks channels
+                latent_size: int = 512,         # For dense models
+                dense_normalization: str = 'none',
+                conv_normalization: str = 'none',
+                disable_gated: bool = True,
+                norm_first_layer: bool = False,
+                norm_last_layer: bool = False,
+                activation: str = 'relu',
+                name: str = 'decoder',
+                **unused_kwargs):
+    '''Helper to return the correct decoder function.'''
+    conv_decoder_size_dict = {
+        128: Conv128Decoder,
+        64: Conv64Decoder,
+        32: Conv32Decoder,
+        # 32: Conv32UpsampleDecoder,
+        # TODO(jramapuram): add other sizing here.
+    }
+    image_size = output_shape[-1]
+
     net_map = {
-        'resnet': {
-            # True for gated, False for non-gated
-            True: functools.partial(_build_resnet_decoder,
-                                    layer_type=ResnetDeconvBlock.gated_deconv3x3,
-                                    filter_depth=config['filter_depth'],
-                                    num_layers=num_layers,
-                                    normalization_str=config['conv_normalization']),
-            False: functools.partial(_build_resnet_decoder,
-                                     layer_type=ResnetDeconvBlock.deconv3x3,
-                                     filter_depth=config['filter_depth'],
-                                     num_layers=num_layers,
-                                     normalization_str=config['conv_normalization'])
-        },
+        # 'resnet': {
+        #     # True for gated, False for non-gated
+        #     True: functools.partial(_build_resnet_decoder,
+        #                             layer_type=ResnetDeconvBlock.gated_deconv3x3,
+        #                             filter_depth=config['filter_depth'],
+        #                             num_layers=num_layers,
+        #                             normalization_str=config['conv_normalization']),
+        #     False: functools.partial(_build_resnet_decoder,
+        #                              layer_type=ResnetDeconvBlock.deconv3x3,
+        #                              filter_depth=config['filter_depth'],
+        #                              num_layers=num_layers,
+        #                              normalization_str=config['conv_normalization'])
+        # },
         'conv': {
-            # True for gated, False for non-gated
-            True: functools.partial(build_gated_conv_decoder,
-                                    filter_depth=config['filter_depth'],
-                                    reupsample=reupsample,
-                                    num_layers=num_layers,
-                                    normalization_str=config['conv_normalization']),
-            False: functools.partial(build_conv_decoder,
-                                     filter_depth=config['filter_depth'],
-                                     reupsample=reupsample,
-                                     num_layers=num_layers,
-                                     normalization_str=config['conv_normalization'])
+            True: functools.partial(conv_decoder_size_dict[image_size],
+                                    input_chans=input_chans,
+                                    output_shape=output_shape,
+                                    base_channels=decoder_base_channels,
+                                    channel_multiplier=decoder_channel_multiplier,
+                                    normalization_str=conv_normalization,
+                                    norm_first_layer=norm_first_layer,
+                                    norm_last_layer=norm_last_layer,
+                                    activation_str=activation,
+                                    layer_fn=functools.partial(GatedConv2d, layer_type=nn.ConvTranspose2d)),
+            False: functools.partial(conv_decoder_size_dict[image_size],
+                                     input_chans=input_chans,
+                                     output_shape=output_shape,
+                                     base_channels=decoder_base_channels,
+                                     channel_multiplier=decoder_channel_multiplier,
+                                     normalization_str=conv_normalization,
+                                     norm_first_layer=norm_first_layer,
+                                     norm_last_layer=norm_last_layer,
+                                     activation_str=activation)
+                                     # layer_fn=nn.ConvTranspose2d),
         },
         'batch_conv': {
-            # True for gated, False for non-gated
-            True: functools.partial(build_batch_gated_conv_decoder,
-                                    filter_depth=config['filter_depth'],
-                                    reupsample=reupsample,
-                                    num_layers=num_layers,
-                                    normalization_str=config['conv_normalization']),
-            False: functools.partial(build_batch_conv_decoder,
-                                     filter_depth=config['filter_depth'],
-                                     reupsample=reupsample,
-                                     num_layers=num_layers,
-                                     normalization_str=config['conv_normalization'])
+            True: functools.partial(conv_decoder_size_dict[image_size],
+                                    input_chans=input_chans,
+                                    output_shape=output_shape,
+                                    base_channels=decoder_base_channels,
+                                    channel_multiplier=decoder_channel_multiplier,
+                                    normalization_str=conv_normalization,
+                                    norm_first_layer=norm_first_layer,
+                                    norm_last_layer=norm_last_layer,
+                                    activation_str=activation,
+                                    layer_fn=functools.partial(GatedConv2d, layer_type=BatchConvTranspose2D)),
+            False: functools.partial(conv_decoder_size_dict[image_size],
+                                     input_chans=input_chans,
+                                     output_shape=output_shape,
+                                     base_channels=decoder_base_channels,
+                                     channel_multiplier=decoder_channel_multiplier,
+                                     normalization_str=conv_normalization,
+                                     norm_first_layer=norm_first_layer,
+                                     norm_last_layer=norm_last_layer,
+                                     activation_str=activation,
+                                     layer_fn=BatchConvTranspose2D),
         },
         'coordconv': {
-            # True for gated, False for non-gated
-            True: functools.partial(build_gated_coord_conv_decoder,
-                                    filter_depth=config['filter_depth'],
-                                    reupsample=reupsample,
-                                    num_layers=num_layers,
-                                    normalization_str=config['conv_normalization']),
-            False: functools.partial(build_coord_conv_decoder,
-                                     filter_depth=config['filter_depth'],
-                                     reupsample=reupsample,
-                                     num_layers=num_layers,
-                                     normalization_str=config['conv_normalization'])
+            True: functools.partial(conv_decoder_size_dict[image_size],
+                                    input_chans=input_chans,
+                                    output_shape=output_shape,
+                                    base_channels=decoder_base_channels,
+                                    channel_multiplier=decoder_channel_multiplier,
+                                    normalization_str=conv_normalization,
+                                    norm_first_layer=norm_first_layer,
+                                    norm_last_layer=norm_last_layer,
+                                    activation_str=activation,
+                                    layer_fn=functools.partial(GatedConv2d, layer_type=CoordConvTranspose)),
+            False: functools.partial(conv_decoder_size_dict[image_size],
+                                     input_chans=input_chans,
+                                     output_shape=output_shape,
+                                     base_channels=decoder_base_channels,
+                                     channel_multiplier=decoder_channel_multiplier,
+                                     normalization_str=conv_normalization,
+                                     norm_first_layer=norm_first_layer,
+                                     norm_last_layer=norm_last_layer,
+                                     activation_str=activation,
+                                     layer_fn=CoordConvTranspose),
         },
-        'dense': {
-            # True for gated, False for non-gated
-            True: functools.partial(build_gated_dense_decoder,
-                                    latent_size=config['latent_size'],
-                                    num_layers=num_layers,
-                                    normalization_str=config['dense_normalization']),
-            False: functools.partial(build_dense_decoder,
-                                     latent_size=config['latent_size'],
-                                     num_layers=num_layers,
-                                     normalization_str=config['dense_normalization'])
-        }
+
+        # 'conv': {
+        #     # True for gated, False for non-gated
+        #     True: functools.partial(build_gated_conv_decoder,
+        #                             filter_depth=config['filter_depth'],
+        #                             reupsample=reupsample,
+        #                             num_layers=num_layers,
+        #                             normalization_str=config['conv_normalization']),
+        #     False: functools.partial(build_conv_decoder,
+        #                              filter_depth=config['filter_depth'],
+        #                              reupsample=reupsample,
+        #                              num_layers=num_layers,
+        #                              normalization_str=config['conv_normalization'])
+        # },
+        # 'batch_conv': {
+        #     # True for gated, False for non-gated
+        #     True: functools.partial(build_batch_gated_conv_decoder,
+        #                             filter_depth=config['filter_depth'],
+        #                             reupsample=reupsample,
+        #                             num_layers=num_layers,
+        #                             normalization_str=config['conv_normalization']),
+        #     False: functools.partial(build_batch_conv_decoder,
+        #                              filter_depth=config['filter_depth'],
+        #                              reupsample=reupsample,
+        #                              num_layers=num_layers,
+        #                              normalization_str=config['conv_normalization'])
+        # },
+        # 'coordconv': {
+        #     # True for gated, False for non-gated
+        #     True: functools.partial(build_gated_coord_conv_decoder,
+        #                             filter_depth=config['filter_depth'],
+        #                             reupsample=reupsample,
+        #                             num_layers=num_layers,
+        #                             normalization_str=config['conv_normalization']),
+        #     False: functools.partial(build_coord_conv_decoder,
+        #                              filter_depth=config['filter_depth'],
+        #                              reupsample=reupsample,
+        #                              num_layers=num_layers,
+        #                              normalization_str=config['conv_normalization'])
+        # },
+        # 'dense': {
+        #     # True for gated, False for non-gated
+        #     True: functools.partial(build_gated_dense_decoder,
+        #                             latent_size=config['latent_size'],
+        #                             num_layers=num_layers,
+        #                             normalization_str=config['dense_normalization']),
+        #     False: functools.partial(build_dense_decoder,
+        #                              latent_size=config['latent_size'],
+        #                              num_layers=num_layers,
+        #                              normalization_str=config['dense_normalization'])
+        # }
     }
 
     # NOTE: pixelcnn is added later, override here
-    layer_type = "conv" if config['decoder_layer_type'] == "pixelcnn" else config['decoder_layer_type']
-    fn = net_map[layer_type][not config['disable_gated']]
+    layer_type = "conv" if decoder_layer_type == "pixelcnn" else decoder_layer_type
+    fn = net_map[layer_type][not disable_gated]
     print("using {} {} for {}".format(
-        "gated" if not config['disable_gated'] else "standard",
-        config['decoder_layer_type'],
+        "gated" if not disable_gated else "standard",
+        decoder_layer_type,
         name
     ))
     return fn
