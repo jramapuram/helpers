@@ -988,7 +988,11 @@ class ResnetBlock(nn.Module):
 
         # The actual underlying model
         self.resample = resample
-        self.norm1 = norm_fn(Identity(), nfeatures=in_channels)  # TODO(jramapuram): doesn't handle weightnorm
+        self.norm1 = Identity()
+        if normalization_str not in ['weightnorm', 'spectralnorm']:
+            # handle special case of weight hooks
+            self.norm1 = norm_fn(self.norm1, nfeatures=in_channels)
+
         self.conv1 = norm_fn(layer_fn(in_channels, out_channels))
         self.act = str_to_activ(activation_str)
         self.conv2 = layer_fn(out_channels, out_channels)
@@ -1005,17 +1009,13 @@ class ResnetBlock(nn.Module):
         if self.resample:
             out = self.resample(out)
             x = self.resample(x)
-            print("[resample] out = {} | res = {}".format(out.shape, x.shape))
 
         out = self.act(self.conv1(x))
-        print("out1 = ", out.shape)
         out = self.conv2(out)
-        print("out2 = ", out.shape)
 
         if self.skip_connection is not None:
             x = self.skip_connection(x)
 
-        print("[final] out = ", out.shape, " | res = ", x.shape)
         return out + x
 
 
@@ -1249,7 +1249,6 @@ def _build_resnet_stack(input_chans, output_chans,
     channels.append(output_chans)
 
     # build the rest of the layers, from 0 --> end -1
-    # for k, s, u, chan_in, chan_out in zip(kernels[0:-1], strides[0:-1], upsample, channels[0:-1], channels[1:]):
     for k, s, r, chan_in, chan_out in zip(kernels, strides, resample, channels[0:-1], channels[1:]):
         # Build the layer definition
         layer_fn_i = functools.partial(layer_fn, kernel_size=k, stride=s, padding=1)
@@ -1264,15 +1263,6 @@ def _build_resnet_stack(input_chans, output_chans,
         layers.append(layer_i)
         # TODO(jramapuram): consider adding attention
         # layers.append(Attention(chan_out, SNConv2d))
-
-    # build the final layer
-    # layer_fn_i = functools.partial(layer_fn, kernel_size=kernels[-1], stride=strides[-1], padding=1)
-    # upsample_i = functools.partial(F.interpolate, scale_factor=2) if upsample[-1] else None
-    # layers.append(ResnetDeconvBlock(channels[-1], output_chans,
-    #                                 upsample=upsample_i,
-    #                                 layer_fn=layer_fn_i,
-    #                                 normalization_str=normalization_str,
-    #                                 activation_str=activation_str))
 
     # Add normalization to the final layer if requested
     if norm_last_layer:
@@ -1330,12 +1320,7 @@ def _build_conv_stack(input_chans, output_chans,
 
     channels.append(output_chans)
 
-    print('channels = ', channels)
-    print('channels = {} | kernels = {} | strides = {}'.format(len(channels), len(kernels), len(strides)))
-    print(len(channels[1:]), len(channels[0:-1]))
-
     # build each individual layer
-    # for k, s, chan_in, chan_out in zip(kernels[0:-1], strides[0:-1], channels[0:-1], channels[1:]):
     for idx, (k, s, chan_in, chan_out) in enumerate(zip(kernels, strides, channels[0:-1], channels[1:])):
         is_last_layer = (idx == len(kernels) - 1)
         if is_last_layer:
@@ -1351,20 +1336,13 @@ def _build_conv_stack(input_chans, output_chans,
             # layers.append(Attention(chan_out, SNConv2d))
             layers.append(activation_fn())
 
-    # build the final layer
-    # normalization_str = 'none' if norm_last_layer is False else normalization_str
-    # final_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, output_chans)}
-    # # layers.append(add_normalization(layer_fn(channels[-2], output_chans, kernel_size=kernels[-1], stride=strides[-1]),
-    # layers.append(add_normalization(layer_fn(channels[-1], output_chans, kernel_size=kernels[-1], stride=strides[-1]),
-    #                                 normalization_str=normalization_str, ndims=2,
-    #                                 nfeatures=output_chans, **final_gn_groups))
     return nn.Sequential(*layers)
 
 
 class Attention(nn.Module):
     def __init__(self, ch, conv_fn):
         """Attention from SAGAN with modification from BigGAN.
-           NOTE: very unstable without spectram-normed conv2d
+           NOTE: very unstable without spectral-normed conv2d
 
            From https://github.com/ajbrock/BigGAN-PyTorch/
 
@@ -1750,17 +1728,13 @@ class Resnet128Encoder(nn.Module):
             norm_layer,
             View([-1, output_size, 1, 1]),
         )
-        print(self.mlp_proj)
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
         assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
         outputs = self.model(images)
-        print("pre-pool size = ", outputs.shape)
         outputs = torch.sum(self.act(outputs), [-2, -1])
-        print("pooled output size = ", outputs.shape)
         outputs = self.mlp_proj(outputs)
-        print("mlp size = ", outputs.shape)
         return outputs
 
 
@@ -1810,11 +1784,8 @@ class Resnet64Encoder(nn.Module):
         """Iterate over each of the layers to produce an output."""
         assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
         outputs = self.model(images)
-        print("pre-pool size = ", outputs.shape)
         outputs = torch.sum(self.act(outputs), [-2, -1])
-        print("pooled output size = ", outputs.shape)
         outputs = self.mlp_proj(outputs)
-        print("mlp size = ", outputs.shape)
         return outputs
 
 
@@ -1864,11 +1835,8 @@ class Resnet32Encoder(nn.Module):
         """Iterate over each of the layers to produce an output."""
         assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
         outputs = self.model(images)
-        print("pre-pool size = ", outputs.shape)
         outputs = torch.sum(self.act(outputs), [-2, -1])
-        print("pooled output size = ", outputs.shape)
         outputs = self.mlp_proj(outputs)
-        print("mlp size = ", outputs.shape)
         return outputs
 
 
