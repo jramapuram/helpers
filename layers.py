@@ -1293,8 +1293,11 @@ def _build_resnet_stack(input_chans, output_chans,
     for i in range(len(kernels) - 2):  # -1 because last one is output_shape[1]
         channels.append(int(channel_multiplier*channels[-1]))
 
+    channels.append(output_chans)
+
     # build the rest of the layers, from 0 --> end -1
-    for k, s, u, chan_in, chan_out in zip(kernels[0:-1], strides[0:-1], upsample, channels[0:-1], channels[1:]):
+    # for k, s, u, chan_in, chan_out in zip(kernels[0:-1], strides[0:-1], upsample, channels[0:-1], channels[1:]):
+    for k, s, u, chan_in, chan_out in zip(kernels, strides, upsample, channels[0:-1], channels[1:]):
         # Build the layer definition
         layer_fn_i = functools.partial(layer_fn, kernel_size=k, stride=s, padding=1)
         upsample_i = functools.partial(F.interpolate, scale_factor=2) if u else None
@@ -1310,13 +1313,13 @@ def _build_resnet_stack(input_chans, output_chans,
         # layers.append(Attention(chan_out, SNConv2d))
 
     # build the final layer
-    layer_fn_i = functools.partial(layer_fn, kernel_size=kernels[-1], stride=strides[-1], padding=1)
-    upsample_i = functools.partial(F.interpolate, scale_factor=2) if upsample[-1] else None
-    layers.append(ResnetDeconvBlock(channels[-1], output_chans,
-                                    upsample=upsample_i,
-                                    layer_fn=layer_fn_i,
-                                    normalization_str=normalization_str,
-                                    activation_str=activation_str))
+    # layer_fn_i = functools.partial(layer_fn, kernel_size=kernels[-1], stride=strides[-1], padding=1)
+    # upsample_i = functools.partial(F.interpolate, scale_factor=2) if upsample[-1] else None
+    # layers.append(ResnetDeconvBlock(channels[-1], output_chans,
+    #                                 upsample=upsample_i,
+    #                                 layer_fn=layer_fn_i,
+    #                                 normalization_str=normalization_str,
+    #                                 activation_str=activation_str))
 
     # Add normalization to the final layer if requested
     if norm_last_layer:
@@ -1372,31 +1375,36 @@ def _build_conv_stack(input_chans, output_chans,
     for i in range(len(kernels) - 2):  # -2 because last one is output_shape[1] and first is input_chans
         channels.append(int(channel_multiplier*channels[-1]))
 
+    channels.append(output_chans)
+
     print('channels = ', channels)
     print('channels = {} | kernels = {} | strides = {}'.format(len(channels), len(kernels), len(strides)))
     print(len(channels[1:]), len(channels[0:-1]))
 
     # build each individual layer
-    # for k, s, chan_in, chan_out in zip(kernels[1:-1], strides[1:-1], channels[0:-1], channels[1:]):
-    for k, s, chan_in, chan_out in zip(kernels[0:-1], strides[0:-1], channels[0:-1], channels[1:]):
+    # for k, s, chan_in, chan_out in zip(kernels[0:-1], strides[0:-1], channels[0:-1], channels[1:]):
+    for idx, (k, s, chan_in, chan_out) in enumerate(zip(kernels, strides, channels[0:-1], channels[1:])):
+        is_last_layer = (idx == len(kernels) - 1)
+        if is_last_layer:
+            normalization_str = 'none' if norm_last_layer is False else normalization_str
+
         li_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, chan_out)}
         layer_i = norm_fn(layer_fn(chan_in, chan_out, kernel_size=k, stride=s),
                           nfeatures=chan_out, **li_gn_groups)
         layers.append(layer_i)
 
-        # TODO(jramapuram): consider adding attention; works only with SNConv2d though
-        # layers.append(Attention(chan_out, SNConv2d))
-
-        layers.append(activation_fn())
+        if not is_last_layer:
+            # TODO(jramapuram): consider adding attention; works only with SNConv2d though
+            # layers.append(Attention(chan_out, SNConv2d))
+            layers.append(activation_fn())
 
     # build the final layer
-    #output_chans = output_shape[0]
-    normalization_str = 'none' if norm_last_layer is False else normalization_str
-    final_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, output_chans)}
-    # layers.append(add_normalization(layer_fn(channels[-2], output_chans, kernel_size=kernels[-1], stride=strides[-1]),
-    layers.append(add_normalization(layer_fn(channels[-1], output_chans, kernel_size=kernels[-1], stride=strides[-1]),
-                                    normalization_str=normalization_str, ndims=2,
-                                    nfeatures=output_chans, **final_gn_groups))
+    # normalization_str = 'none' if norm_last_layer is False else normalization_str
+    # final_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, output_chans)}
+    # # layers.append(add_normalization(layer_fn(channels[-2], output_chans, kernel_size=kernels[-1], stride=strides[-1]),
+    # layers.append(add_normalization(layer_fn(channels[-1], output_chans, kernel_size=kernels[-1], stride=strides[-1]),
+    #                                 normalization_str=normalization_str, ndims=2,
+    #                                 nfeatures=output_chans, **final_gn_groups))
     return nn.Sequential(*layers)
 
 
@@ -1656,7 +1664,112 @@ class Resnet32Decoder(nn.Module):
                                          normalization_str=normalization_str,
                                          norm_first_layer=False,  # Handled already
                                          norm_last_layer=norm_last_layer)
-        print(self.model)
+
+    def forward(self, images, upsample_last=False):
+        """Iterate over each of the layers to produce an output."""
+        if len(images.shape) == 2:
+            images = images.view(*images.shape, 1, 1)
+
+        outputs = self.mlp_proj(images)
+        outputs = self.model(outputs)
+
+        if upsample_last:
+            return F.upsample(outputs, size=outputs.shape[-2:],
+                              mode='bilinear',
+                              align_corners=True)
+
+        return outputs
+
+
+class Resnet64Decoder(nn.Module):
+    def __init__(self, input_chans, output_chans, base_channels=1024, channel_multiplier=0.5,
+                 activation_str="relu", normalization_str="none", norm_first_layer=True,
+                 norm_last_layer=False, layer_fn=nn.Conv2d):
+        super(Resnet64Decoder, self).__init__()
+        assert isinstance(input_chans, (float, int)), "Expect input_size as float or int."
+
+        # Handle pre-decoder normalization
+        norm_layer = Identity()
+        if norm_first_layer:
+            norm_layer = add_normalization(norm_layer, normalization_str,
+                                           ndims=1, nfeatures=input_chans)
+
+        # Project to 4x4 first
+        self.mlp_proj = nn.Sequential(
+            View([-1, input_chans]),
+            norm_layer,
+            add_normalization(nn.Linear(input_chans, input_chans*4*4),
+                              normalization_str, ndims=1, nfeatures=input_chans*4*4),
+            str_to_activ_module(activation_str)(),
+            View([-1, input_chans, 4, 4]),
+        )
+
+        # The main model
+        self.model = _build_resnet_stack(input_chans=input_chans,
+                                         output_chans=output_chans,
+                                         layer_fn=layer_fn,
+                                         base_channels=base_channels,
+                                         channel_multiplier=channel_multiplier,
+                                         kernels=[3, 3, 3, 3],
+                                         strides=[1, 1, 1, 1],
+                                         upsample=[True, True, True, True],
+                                         activation_str=activation_str,
+                                         normalization_str=normalization_str,
+                                         norm_first_layer=False,  # Handled already
+                                         norm_last_layer=norm_last_layer)
+
+    def forward(self, images, upsample_last=False):
+        """Iterate over each of the layers to produce an output."""
+        if len(images.shape) == 2:
+            images = images.view(*images.shape, 1, 1)
+
+        outputs = self.mlp_proj(images)
+        outputs = self.model(outputs)
+
+        if upsample_last:
+            return F.upsample(outputs, size=outputs.shape[-2:],
+                              mode='bilinear',
+                              align_corners=True)
+
+        return outputs
+
+
+class Resnet128Decoder(nn.Module):
+    def __init__(self, input_chans, output_chans, base_channels=1024, channel_multiplier=0.5,
+                 activation_str="relu", normalization_str="none", norm_first_layer=True,
+                 norm_last_layer=False, layer_fn=nn.Conv2d):
+        super(Resnet128Decoder, self).__init__()
+        assert isinstance(input_chans, (float, int)), "Expect input_size as float or int."
+
+        # Handle pre-decoder normalization
+        norm_layer = Identity()
+        if norm_first_layer:
+            norm_layer = add_normalization(norm_layer, normalization_str,
+                                           ndims=1, nfeatures=input_chans)
+
+        # Project to 4x4 first
+        self.mlp_proj = nn.Sequential(
+            View([-1, input_chans]),
+            norm_layer,
+            add_normalization(nn.Linear(input_chans, input_chans*4*4),
+                              normalization_str, ndims=1, nfeatures=input_chans*4*4),
+            str_to_activ_module(activation_str)(),
+            View([-1, input_chans, 4, 4]),
+        )
+
+        # The main model
+        self.model = _build_resnet_stack(input_chans=input_chans,
+                                         output_chans=output_chans,
+                                         layer_fn=layer_fn,
+                                         base_channels=base_channels,
+                                         channel_multiplier=channel_multiplier,
+                                         kernels=[3, 3, 3, 3, 3],
+                                         strides=[1, 1, 1, 1, 1],
+                                         upsample=[True, True, True, True, True],
+                                         activation_str=activation_str,
+                                         normalization_str=normalization_str,
+                                         norm_first_layer=False,  # Handled already
+                                         norm_last_layer=norm_last_layer)
 
     def forward(self, images, upsample_last=False):
         """Iterate over each of the layers to produce an output."""
@@ -2043,10 +2156,11 @@ def get_decoder(input_chans: int,                    # input size to decoder
         # TODO(jramapuram): add other sizing here.
     }
     resnet_size_dict = {
-        # 128: Resnet128Decoder,
-        # 64: Resnet64Decoder,
+        128: Resnet128Decoder,
+        64: Resnet64Decoder,
         32: Resnet32Decoder,
     }
+
     image_size = output_shape[-1]
 
     net_map = {
