@@ -993,16 +993,16 @@ class ResnetBlock(nn.Module):
             # handle special case of weight hooks
             self.norm1 = norm_fn(self.norm1, nfeatures=in_channels)
 
-        self.conv1 = norm_fn(layer_fn(in_channels, out_channels))
+        self.conv1 = norm_fn(nn.utils.spectral_norm(layer_fn(in_channels, out_channels)))
         self.act = str_to_activ(activation_str)
-        self.conv2 = layer_fn(out_channels, out_channels)
+        self.conv2 = nn.utils.spectral_norm(layer_fn(out_channels, out_channels))
         # self.conv2 = norm_fn(layer_fn(out_channels, out_channels))
 
         # Learnable skip-connection
         self.skip_connection = None
         if in_channels != out_channels or resample is not None:
-            self.skip_connection = layer_fn(in_channels, out_channels,
-                                            kernel_size=1, padding=0)
+            self.skip_connection = nn.utils.spectral_norm(layer_fn(in_channels, out_channels,
+                                                                   kernel_size=1, padding=0))
 
     def forward(self, x):
         out = self.act(self.norm1(x))
@@ -1262,7 +1262,7 @@ def _build_resnet_stack(input_chans, output_chans,
                               activation_str=activation_str)
         layers.append(layer_i)
         # TODO(jramapuram): consider adding attention
-        # layers.append(Attention(chan_out, SNConv2d))
+        # layers.append(Attention(chan_out, layer_fn))
 
     # Add normalization to the final layer if requested
     if norm_last_layer:
@@ -1358,10 +1358,10 @@ class Attention(nn.Module):
         # Channel multiplier
         self.ch = ch
         self.which_conv = conv_fn
-        self.theta = self.which_conv(self.ch, self.ch // 8, kernel_size=1, padding=0, bias=False)
-        self.phi = self.which_conv(self.ch, self.ch // 8, kernel_size=1, padding=0, bias=False)
-        self.g = self.which_conv(self.ch, self.ch // 2, kernel_size=1, padding=0, bias=False)
-        self.o = self.which_conv(self.ch // 2, self.ch, kernel_size=1, padding=0, bias=False)
+        self.theta = nn.utils.spectral_norm(self.which_conv(self.ch, self.ch // 8, kernel_size=1, padding=0, bias=False))
+        self.phi = nn.utils.spectral_norm(self.which_conv(self.ch, self.ch // 8, kernel_size=1, padding=0, bias=False))
+        self.g = nn.utils.spectral_norm(self.which_conv(self.ch, self.ch // 2, kernel_size=1, padding=0, bias=False))
+        self.o = nn.utils.spectral_norm(self.which_conv(self.ch // 2, self.ch, kernel_size=1, padding=0, bias=False))
 
         # Learnable gain parameter
         self.gamma = nn.Parameter(torch.tensor(0.), requires_grad=True)
@@ -2278,6 +2278,26 @@ def get_decoder(input_chans: int,                    # input size to decoder
         name
     ))
     return fn
+
+
+def add_weight_decay(model, weight_decay=1e-5, skip_list=()):
+    # Tweaked from https://bit.ly/3dzyqod
+    if weight_decay == 0:
+        return model.parameters()
+
+    decay = []
+    no_decay = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+
+        if len(param.shape) == 1 or name in skip_list:
+            no_decay.append(param)
+        else:
+            decay.append(param)
+    return [
+        {'params': no_decay, 'weight_decay': 0.},
+        {'params': decay, 'weight_decay': weight_decay}]
 
 
 def append_save_and_load_fns(model, optimizer, grapher, args):

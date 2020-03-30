@@ -626,7 +626,7 @@ def get_name(args):
     nonestr2bool = lambda v: 0 if isinstance(v, str) and v.lower().strip() == 'none' else v
     # clip2int = lambda v: int(v) if isinstance(v, (float, np.float32, np.float64)) and v == 0.0 else v
     clip2int = lambda v: int(v) if isinstance(v, float) and v - int(v) == 0 else v
-    filtered = {_factor(k):clip2int(nonestr2bool(none2bool(bool2int(v)))) for k,v in filtered.items()}
+    filtered = {_factor(k):clip2int(nonestr2bool(none2bool(bool2int(v)))) for k, v in filtered.items()}
     name = _clean_task_str("{}_{}".format(
         args.uid if args.uid else "",
         "_".join(["{}{}".format(k, v) for k, v in filtered.items()])
@@ -643,8 +643,9 @@ def get_name(args):
                            .replace('log_logistic_256', 'll256')
                            .replace('pixelcnn', 'pcnn')
                            .replace('isotropic_gaussian', 'ig')
-                           .replace('bernoulli', 'bern')
-                           .replace('mixture', 'mix')
+                           .replace('bernoulli', 'B')
+                           .replace('discrete', 'D')
+                           .replace('mixture', 'M')
                            .replace('parallel', 'par')
                            .replace('coordconv', 'cc')
                            .replace('dense', 'd')
@@ -663,6 +664,10 @@ def get_name(args):
                            .replace('uniform', 'u')
                            .replace('additive_vrnn', 'avrnn')
                            .replace('orthogonal', 'o')
+                           .replace('gaussian', 'N')
+                           .replace('cosine', 'cos')
+                           .replace('lars_', 'l')
+                           .replace('momentum', 'mom')
     )
 
     # sanity check to ensure filename is 255 chars or less for being able to write to filesystem
