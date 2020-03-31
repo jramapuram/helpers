@@ -6,6 +6,7 @@ import functools
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from torchvision import models
 from typing import Tuple
 from collections import OrderedDict
 
@@ -562,9 +563,10 @@ class RNNImageClassifier(nn.Module):
 
         # build the models
         self.feature_extractor = nn.Sequential(
-            build_conv_encoder(input_shape, latent_size,
-                               normalization_str=conv_normalization_str),
-            nn.SELU())
+            get_encoder(input_shape, encoder_layer_type='conv',
+                        conv_normalization=conv_normalization_str)(output_size=latent_size),
+            nn.SELU()
+        )
         self.rnn = self._build_rnn(latent_size, bias=bias, dropout=dropout)
         self.output_projector = build_dense_encoder(latent_size, output_size,
                                                     normalization_str=dense_normalization_str, nlayers=2)
@@ -989,20 +991,22 @@ class ResnetBlock(nn.Module):
         # The actual underlying model
         self.resample = resample
         self.norm1 = Identity()
-        if normalization_str not in ['weightnorm', 'spectralnorm']:
-            # handle special case of weight hooks
+        if normalization_str not in ['weightnorm', 'spectralnorm']:  # handle special case of weight hooks
             self.norm1 = norm_fn(self.norm1, nfeatures=in_channels)
 
-        self.conv1 = norm_fn(nn.utils.spectral_norm(layer_fn(in_channels, out_channels)))
+        # self.conv1 = norm_fn(nn.utils.spectral_norm(layer_fn(in_channels, out_channels)))
+        # self.act = str_to_activ(activation_str)
+        # self.conv2 = nn.utils.spectral_norm(layer_fn(out_channels, out_channels))
+        self.conv1 = norm_fn(layer_fn(in_channels, out_channels))
         self.act = str_to_activ(activation_str)
-        self.conv2 = nn.utils.spectral_norm(layer_fn(out_channels, out_channels))
-        # self.conv2 = norm_fn(layer_fn(out_channels, out_channels))
+        self.conv2 = layer_fn(out_channels, out_channels)
 
         # Learnable skip-connection
         self.skip_connection = None
         if in_channels != out_channels or resample is not None:
-            self.skip_connection = nn.utils.spectral_norm(layer_fn(in_channels, out_channels,
-                                                                   kernel_size=1, padding=0))
+            # self.skip_connection = nn.utils.spectral_norm(layer_fn(in_channels, out_channels,
+            #                                                        kernel_size=1, padding=0))
+            self.skip_connection = layer_fn(in_channels, out_channels, kernel_size=1, padding=0)
 
     def forward(self, x):
         out = self.act(self.norm1(x))
@@ -1262,7 +1266,9 @@ def _build_resnet_stack(input_chans, output_chans,
                               activation_str=activation_str)
         layers.append(layer_i)
         # TODO(jramapuram): consider adding attention
-        # layers.append(Attention(chan_out, layer_fn))
+        # if channel_multiplier < 1:
+        if chan_out >= 4:
+            layers.append(Attention(chan_out, layer_fn))
 
     # Add normalization to the final layer if requested
     if norm_last_layer:
@@ -1840,6 +1846,45 @@ class Resnet32Encoder(nn.Module):
         return outputs
 
 
+class TorchvisionEncoder(nn.Module):
+    """Wraps torchvision models such as Resnet50, etc."""
+    def __init__(self, output_size, activation_str="relu",
+                 normalization_str="none", norm_last_layer=False,
+                 layer_fn=models.resnet50, pretrained=False, **unused_args):
+        super(TorchvisionEncoder, self).__init__()
+        self.output_size = output_size
+        self.activation = str_to_activ_module(activation_str)
+
+        self.model = nn.Sequential(
+            *list(layer_fn(pretrained=pretrained).children())[:-1]
+        )
+
+        # Lazy initialize this.
+        self.fc = None
+
+        # Norm last layer if requested
+        self.norm_fn = None
+        if norm_last_layer:
+            gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, output_size)}
+            self.norm_fn = functools.partial(
+                add_normalization, normalization_str=normalization_str,
+                ndims=2, nfeatures=output_size, **gn_groups)
+
+    def _lazy_init_fc(self, input_size):
+        if self.fc is None:
+            self.fc = nn.Sequential(self.activation(), nn.Linear(input_size, self.output_size))
+            if self.norm_fn is not None:
+                self.fc = self.norm_fn(self.fc, nfeatures=self.output_size)
+
+    def forward(self, images):
+        # if images.shape[2] != 224:
+        #     images = F.interpolate(images, size=(224, 244), mode='bilinear', align_corners=True)
+
+        outputs = self.model(images)
+        self._lazy_init_fc(outputs.shape[1])
+        return self.fc(outputs.squeeze())
+
+
 class Conv32Encoder(nn.Module):
     def __init__(self, input_chans, output_size, base_channels=32, channel_multiplier=2,
                  activation_str="relu", normalization_str="none", norm_last_layer=False,
@@ -1921,66 +1966,68 @@ class Conv128Encoder(nn.Module):
         return self.model(images)
 
 
-def _build_dense(input_shape, output_shape, latent_size=512, num_layers=2,
-                 activation_fn=nn.SELU, normalization_str="none",
-                 layer=nn.Linear, **kwargs):
+def _build_dense(input_shape, output_shape=None, output_size=None,
+                 layer_fn=nn.Linear,
+                 latent_size=512, num_layers=2,
+                 activation_str="elu", normalization_str="none",
+                 norm_first_layer=False, norm_last_layer=False,
+                 disable_flatten=False, **unused_kwargs):
     ''' flatten --> layer + norm --> activation -->... --> Linear output --> view'''
+    assert normalization_str != "groupnorm", "Groupnorm not supported for dense models."
+    assert output_shape is not None or output_size is not None, "Need output_shape or output_size."
+    if output_size is not None:
+        assert output_shape is None, "Only provide output_shape or output_size."
+
+    if output_shape is not None:
+        assert output_size is not None, "Only provide output_shape or output_size."
+
+    # Sizing computations
     input_flat = int(np.prod(input_shape))
-    output_flat = int(np.prod(output_shape))
-    output_shape = [output_shape] if not isinstance(output_shape, list) else output_shape
+    output_flat = int(np.prod(output_shape)) if output_shape is not None else output_size
+    if output_shape is not None:
+        output_shape = [output_shape] if not isinstance(output_shape, list) else output_shape
+    else:
+        output_shape = [output_size]
+
+    # Activation and normalization functions
+    activation_fn = str_to_activ_module(activation_str)
+    norm_fn = functools.partial(
+        add_normalization, normalization_str=normalization_str, ndims=1)
 
     # don't flatten if we passed 'disable_flatten' in kwargs
-    if kwargs.get('disable_flatten', False) and input_flat == input_shape:
+    if disable_flatten and input_flat == input_shape:
         view_init_layer = Identity()
         view_final_layer = Identity()
     else:
         view_init_layer = View([-1, input_flat])
         view_final_layer = View([-1] + output_shape)
 
+    # add initial norm if requested
+    if norm_first_layer:
+        view_init_layer = norm_fn(view_init_layer, nfeatures=input_flat)
+
+    # add final norm if requested
+    norm_final_layer = Identity()
+    if norm_last_layer:
+        norm_final_layer = norm_fn(norm_final_layer, nfeatures=output_flat)
+
     layers = [('view0', view_init_layer),
-              ('l0', add_normalization(layer(input_flat, latent_size),
+              ('l0', add_normalization(layer_fn(input_flat, latent_size),
                                        normalization_str, 1, latent_size, num_groups=32)),
               ('act0', activation_fn())]
 
     for i in range(num_layers - 2):  # 2 for init layer[above] + final layer[below]
         layers.append(
-            ('l{}'.format(i+1), add_normalization(layer(latent_size, latent_size),
+            ('l{}'.format(i+1), add_normalization(layer_fn(latent_size, latent_size),
                                                   normalization_str, 1, latent_size, num_groups=32))
         )
         layers.append(('act{}'.format(i+1), activation_fn()))
 
-    layers.append(('output', layer(latent_size, output_flat)))
+    layers.append(('output', layer_fn(latent_size, output_flat)))
+    layers.append(('output_norm', norm_final_layer))
     layers.append(('viewout', view_final_layer))
 
     return nn.Sequential(OrderedDict(layers))
-
-
-def build_dense_encoder(input_shape, output_size, latent_size=512, num_layers=2,
-                        activation_fn=nn.SELU, normalization_str="none", **kwargs):
-    ''' flatten --> layer + norm --> activation -->... --> Linear output --> view'''
-    return _build_dense(input_shape, output_size, latent_size, num_layers,
-                        activation_fn, normalization_str, layer=nn.Linear, **kwargs)
-
-
-def build_gated_dense_encoder(input_shape, output_size, latent_size=512, num_layers=2,
-                              activation_fn=nn.SELU, normalization_str="none", **kwargs):
-    ''' flatten --> layer + norm --> activation -->... --> Linear output --> view '''
-    return _build_dense(input_shape, output_size, latent_size, num_layers,
-                        activation_fn, normalization_str, layer=GatedDense, **kwargs)
-
-
-def build_gated_dense_decoder(input_size, output_shape, latent_size=512, num_layers=2,
-                              activation_fn=nn.SELU, normalization_str="none", **kwargs):
-    ''' accecpts a flattened vector (input_size) and outputs output_shape '''
-    return _build_dense(input_size, output_shape, latent_size, num_layers,
-                        activation_fn, normalization_str, layer=GatedDense, **kwargs)
-
-
-def build_dense_decoder(input_size, output_shape, latent_size=512, num_layers=3,
-                        activation_fn=nn.SELU, normalization_str="none", **kwargs):
-    ''' accepts a flattened vector (input_size) and outputs output_shape '''
-    return _build_dense(input_size, output_shape, latent_size, num_layers,
-                        activation_fn, normalization_str, layer=nn.Linear, **kwargs)
 
 
 def get_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
@@ -2000,32 +2047,23 @@ def get_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
         128: Conv128Encoder,
         64: Conv64Encoder,
         32: Conv32Encoder,
-        # TODO(jramapuram): add other sizing here.
     }
     resnet_size_dict = {
         128: Resnet128Encoder,
         64: Resnet64Encoder,
         32: Resnet32Encoder,
-        # TODO(jramapuram): add other sizing here.
     }
     chans, image_size = input_shape[0], input_shape[-1]
 
     net_map = {
-        # 'resnet': {
-        #     # True for gated, False for non-gated
-        #     True: functools.partial(_build_resnet_encoder,
-        #                             layer_type=ResnetBlock.gated_conv3x3,
-        #                             filter_depth=config['filter_depth'],
-        #                             num_layers=num_layers,
-        #                             bilinear_size=(determined_size, determined_size),
-        #                             normalization_str=config['conv_normalization']),
-        #     False: functools.partial(_build_resnet_encoder,
-        #                              layer_type=ResnetBlock.conv3x3,
-        #                              filter_depth=config['filter_depth'],
-        #                              num_layers=num_layers,
-        #                              bilinear_size=(determined_size, determined_size),
-        #                              normalization_str=config['conv_normalization'])
-        # },
+        'resnet50': {
+            False: functools.partial(TorchvisionEncoder,
+                                     activation_str=activation,
+                                     normalization_str=conv_normalization,
+                                     norm_last_layer=norm_last_layer,
+                                     pretrained=False,
+                                     layer_fn=models.resnet50),
+        },
         'resnet': {
             # True for gated, False for non-gated
             True: functools.partial(resnet_size_dict[image_size],
@@ -2099,19 +2137,27 @@ def get_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
                                      activation_str=activation,
                                      layer_fn=CoordConv),
         },
-        # 'dense': {
-        #     # True for gated, False for non-gated
-        #     True: functools.partial(build_gated_dense_encoder,
-        #                             latent_size=latent_size,
-        #                             num_layers=3,  # XXX(jramapuram): hardcoded
-        #                             bilinear_size=(determined_size, determined_size),
-        #                             normalization_str=dense_normalization),
-        #     False: functools.partial(build_dense_encoder,
-        #                              latent_size=latent_size,
-        #                              num_layers=3,
-        #                              bilinear_size=(determined_size, determined_size),
-        #                              normalization_str=dense_normalization)
-        # }
+        'dense': {
+            # True for gated, False for non-gated
+            True: functools.partial(_build_dense,
+                                    input_shape=input_shape,
+                                    latent_size=latent_size,
+                                    num_layers=3,  # XXX(jramapuram): hardcoded, can be over-ridden during init
+                                    norm_first_layer=False,  # input data
+                                    norm_last_layer=norm_last_layer,
+                                    activation_str=activation,
+                                    normalization_str=dense_normalization,
+                                    layer_fn=GatedDense),
+            False: functools.partial(_build_dense,
+                                     input_shape=input_shape,
+                                     latent_size=latent_size,
+                                     num_layers=3,  # XXX(jramapuram): hardcoded, can be over-ridden during init
+                                     norm_first_layer=False,  # input data
+                                     norm_last_layer=norm_last_layer,
+                                     activation_str=activation,
+                                     normalization_str=dense_normalization,
+                                     layer_fn=nn.Linear)
+        }
     }
 
     fn = net_map[encoder_layer_type][not disable_gated]
@@ -2123,7 +2169,7 @@ def get_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
     return fn
 
 
-def get_decoder(input_chans: int,                    # input size to decoder
+def get_decoder(input_size: int,                    # input size to decoder
                 output_shape: Tuple[int, int, int],  # output image shape [B, H, W]
                 decoder_layer_type: str = 'conv',
                 decoder_base_channels: int = 1024,      # For conv models
@@ -2143,7 +2189,6 @@ def get_decoder(input_chans: int,                    # input size to decoder
         64: Conv64Decoder,
         32: Conv32Decoder,
         # 32: Conv32UpsampleDecoder,
-        # TODO(jramapuram): add other sizing here.
     }
     resnet_size_dict = {
         128: Resnet128Decoder,
@@ -2154,34 +2199,10 @@ def get_decoder(input_chans: int,                    # input size to decoder
     image_size = output_shape[-1]
 
     net_map = {
-        # 'resnet': {
-        #     # True for gated, False for non-gated
-        #     True: functools.partial(_build_resnet_decoder,
-        #                             layer_type=ResnetDeconvBlock.gated_deconv3x3,
-        #                             filter_depth=config['filter_depth'],
-        #                             num_layers=num_layers,
-        #                             normalization_str=config['conv_normalization']),
-        #     False: functools.partial(_build_resnet_decoder,
-        #                              layer_type=ResnetDeconvBlock.deconv3x3,
-        #                              filter_depth=config['filter_depth'],
-        #                              num_layers=num_layers,
-        #                              normalization_str=config['conv_normalization'])
-        # },
-        # 'dense': {
-        #     # True for gated, False for non-gated
-        #     True: functools.partial(build_gated_dense_decoder,
-        #                             latent_size=config['latent_size'],
-        #                             num_layers=num_layers,
-        #                             normalization_str=config['dense_normalization']),
-        #     False: functools.partial(build_dense_decoder,
-        #                              latent_size=config['latent_size'],
-        #                              num_layers=num_layers,
-        #                              normalization_str=config['dense_normalization'])
-        # }
         'resnet': {
             # True for gated, False for non-gated
             True: functools.partial(resnet_size_dict[image_size],
-                                    input_chans=input_chans,
+                                    input_chans=input_size,
                                     output_chans=output_shape[0],
                                     base_channels=decoder_base_channels,
                                     channel_multiplier=decoder_channel_multiplier,
@@ -2189,9 +2210,9 @@ def get_decoder(input_chans: int,                    # input size to decoder
                                     norm_first_layer=norm_first_layer,
                                     norm_last_layer=norm_last_layer,
                                     activation_str=activation,
-                                    layer_fn=functools.partial(GatedConv2d, layer_type=nn.ConvTranspose2d)),
+                                    layer_fn=functools.partial(GatedConv2d, layer_type=nn.Conv2d)),
             False: functools.partial(resnet_size_dict[image_size],
-                                     input_chans=input_chans,
+                                     input_chans=input_size,
                                      output_chans=output_shape[0],
                                      base_channels=decoder_base_channels,
                                      channel_multiplier=decoder_channel_multiplier,
@@ -2203,7 +2224,7 @@ def get_decoder(input_chans: int,                    # input size to decoder
         },
         'conv': {
             True: functools.partial(conv_size_dict[image_size],
-                                    input_chans=input_chans,
+                                    input_chans=input_size,
                                     output_chans=output_shape[0],
                                     base_channels=decoder_base_channels,
                                     channel_multiplier=decoder_channel_multiplier,
@@ -2213,19 +2234,19 @@ def get_decoder(input_chans: int,                    # input size to decoder
                                     activation_str=activation,
                                     layer_fn=functools.partial(GatedConv2d, layer_type=nn.ConvTranspose2d)),
             False: functools.partial(conv_size_dict[image_size],
-                                     input_chans=input_chans,
+                                     input_chans=input_size,
                                      output_chans=output_shape[0],
                                      base_channels=decoder_base_channels,
                                      channel_multiplier=decoder_channel_multiplier,
                                      normalization_str=conv_normalization,
                                      norm_first_layer=norm_first_layer,
                                      norm_last_layer=norm_last_layer,
-                                     activation_str=activation)
-                                     # layer_fn=nn.ConvTranspose2d),
+                                     activation_str=activation,
+                                     layer_fn=nn.ConvTranspose2d)
         },
         'batch_conv': {
             True: functools.partial(conv_size_dict[image_size],
-                                    input_chans=input_chans,
+                                    input_chans=input_size,
                                     output_chans=output_shape[0],
                                     base_channels=decoder_base_channels,
                                     channel_multiplier=decoder_channel_multiplier,
@@ -2235,7 +2256,7 @@ def get_decoder(input_chans: int,                    # input size to decoder
                                     activation_str=activation,
                                     layer_fn=functools.partial(GatedConv2d, layer_type=BatchConvTranspose2D)),
             False: functools.partial(conv_size_dict[image_size],
-                                     input_chans=input_chans,
+                                     input_chans=input_size,
                                      output_chans=output_shape[0],
                                      base_channels=decoder_base_channels,
                                      channel_multiplier=decoder_channel_multiplier,
@@ -2247,7 +2268,7 @@ def get_decoder(input_chans: int,                    # input size to decoder
         },
         'coordconv': {
             True: functools.partial(conv_size_dict[image_size],
-                                    input_chans=input_chans,
+                                    input_chans=input_size,
                                     output_chans=output_shape[0],
                                     base_channels=decoder_base_channels,
                                     channel_multiplier=decoder_channel_multiplier,
@@ -2257,7 +2278,7 @@ def get_decoder(input_chans: int,                    # input size to decoder
                                     activation_str=activation,
                                     layer_fn=functools.partial(GatedConv2d, layer_type=CoordConvTranspose)),
             False: functools.partial(conv_size_dict[image_size],
-                                     input_chans=input_chans,
+                                     input_chans=input_size,
                                      output_chans=output_shape[0],
                                      base_channels=decoder_base_channels,
                                      channel_multiplier=decoder_channel_multiplier,
@@ -2266,6 +2287,29 @@ def get_decoder(input_chans: int,                    # input size to decoder
                                      norm_last_layer=norm_last_layer,
                                      activation_str=activation,
                                      layer_fn=CoordConvTranspose),
+        },
+        'dense': {
+            # True for gated, False for non-gated
+            True: functools.partial(_build_dense,
+                                    input_shape=input_size,
+                                    output_shape=output_shape,
+                                    latent_size=latent_size,
+                                    num_layers=3,  # XXX(jramapuram): hardcoded, can be over-ridden during init
+                                    norm_first_layer=norm_first_layer,
+                                    norm_last_layer=norm_last_layer,
+                                    activation_str=activation,
+                                    normalization_str=dense_normalization,
+                                    layer_fn=GatedDense),
+            False: functools.partial(_build_dense,
+                                     input_shape=input_size,
+                                     output_shape=output_shape,
+                                     latent_size=latent_size,
+                                     num_layers=3,  # XXX(jramapuram): hardcoded, can be over-ridden during init
+                                     norm_first_layer=False,  # input data
+                                     norm_last_layer=norm_last_layer,
+                                     activation_str=activation,
+                                     normalization_str=dense_normalization,
+                                     layer_fn=nn.Linear)
         },
     }
 

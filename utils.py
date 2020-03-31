@@ -668,6 +668,7 @@ def get_name(args):
                            .replace('cosine', 'cos')
                            .replace('lars_', 'l')
                            .replace('momentum', 'mom')
+                           .replace('autoencoder', 'ae')
     )
 
     # sanity check to ensure filename is 255 chars or less for being able to write to filesystem
@@ -677,9 +678,7 @@ def get_name(args):
 
 def register_nan_checks(model):
     def check_grad(module, grad_input, grad_output):
-        # print(module) you can add this to see that the hook is called
-        #print(module)
-        if  any(np.all(np.isnan(gi.data.cpu().numpy())) for gi in grad_input if gi is not None):
+        if any(np.all(np.isnan(gi.data.cpu().numpy())) for gi in grad_input if gi is not None):
             print('NaN gradient in ' + type(module).__name__)
             exit(-1)
 
