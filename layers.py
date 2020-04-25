@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from torchvision import models
-from typing import Tuple
+from typing import Tuple, Union
 from collections import OrderedDict
 
 from .utils import check_or_create_dir, same_type
@@ -69,6 +69,51 @@ class BWtoRGB(nn.Module):
             return torch.cat([x, x, x], 1)
 
         return x
+
+
+class DistributedDataParallelPassthrough(nn.parallel.DistributedDataParallel):
+    """Simple wrapper to still access underlying members of a data-paralleled module.
+       Sourced from: https://bit.ly/2VLphRn
+    """
+    def __getattr__(self, name):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.module, name)
+
+
+class EvoNormS0(nn.Module):
+    """Implementes Evolving Normalization-Activation Layers, Liu et. at 2020."""
+
+    def __init__(self, num_features, groups=32, eps=1e-5):
+        super(EvoNormS0, self).__init__()
+        assert num_features % groups == 0, "{} % {} != 0 ".format(num_features, groups)
+        self.eps = eps
+        self.groups = groups
+        self.v = nn.Parameter(torch.ones(num_features), requires_grad=True)
+        self.gamma = nn.Parameter(torch.ones(num_features), requires_grad=True)
+        self.beta = nn.Parameter(torch.zeros(num_features), requires_grad=True)
+
+    @staticmethod
+    def group_std(x, eps, groups):
+        """Calculates groupnorm std-dev."""
+        N, C, H, W = x.shape
+        orig_type = x.dtype
+        x = x.view([N, groups, C // groups, H, W])
+        var = torch.var(x.float(), [2, 3, 4], keepdim=True)
+        var = var.add_(eps).sqrt_().view(N, -1, 1, 1).type(orig_type)
+        # var = var.add_(eps).sqrt_().type(orig_type)
+        print("var = ", var.shape)
+        return var
+
+    def forward(self, x):
+        if self.training:
+            num = x * torch.sigmoid(self.v.view(1, -1, 1, 1) * x)
+            print("num = ", num.shape)
+            return (num / self.group_std(x, self.eps, self.groups) * self.gamma.view(1, -1, 1, 1)
+                    + self.beta.view(1, -1, 1, 1))
+
+        return x * self.gamma + self.beta
 
 
 class Upsample(nn.Module):
@@ -568,8 +613,9 @@ class RNNImageClassifier(nn.Module):
             nn.SELU()
         )
         self.rnn = self._build_rnn(latent_size, bias=bias, dropout=dropout)
-        self.output_projector = build_dense_encoder(latent_size, output_size,
-                                                    normalization_str=dense_normalization_str, nlayers=2)
+        self.output_projector = _build_dense(input_size=latent_size,
+                                             output_size=output_size,
+                                             normalization_str=dense_normalization_str)
         self.state = None
 
     def _build_rnn(self, latent_size, model_type='lstm', bias=True, dropout=False):
@@ -618,7 +664,7 @@ class RNNImageClassifier(nn.Module):
 
     def forward(self, x, reset_state=False, reduce_mean=True):
         ''' helper that does forward rnn and forward prediction '''
-        outputs = self.forward_rnn(x, reset_state, return_outputs=False)
+        _ = self.forward_rnn(x, reset_state, return_outputs=False)
         return self.forward_prediction(reduce_mean=reduce_mean)
 
 
@@ -659,6 +705,7 @@ class ModelSaver(object):
         :rtype: object
 
         """
+        self.gpu = args.gpu
         self.epoch = 1
         self.model = model
         self.burn_in_interval = burn_in_interval
@@ -668,7 +715,8 @@ class ModelSaver(object):
 
     def save(self, **kwargs):
         kwargs.setdefault('epoch', self.epoch)
-        self.model.save(**kwargs)
+        if self.gpu == 0:
+            self.model.save(**kwargs)
 
     def restore(self):
         """ Restores the model, optimizer params, set the current epoch and returns
@@ -783,17 +831,36 @@ def flatten_layers(model, base_index=0, is_recursive=False):
     return layers, base_index
 
 
-def init_weights(module):
+def init_weights(module, init='orthogonal'):
+    """Initialize all the weights and biases of a model.
+
+    :param module: any nn.Module or nn.Sequential
+    :param init: type of initialize, see dict below.
+    :returns: same module with initialized weights
+    :rtype: type(module)
+
+    """
+    if init is None:  # Base case, no change to default.
+        return module
+
+    init_dict = {
+        'xavier_uniform': nn.init.xavier_uniform_,
+        'xavier_normal': nn.init.xavier_normal_,
+        'orthogonal': nn.init.orthogonal_,
+        'kaiming_normal': nn.init.kaiming_normal_,
+        'kaiming_uniform': nn.init.kaiming_uniform_,
+    }
+
     for m in module.modules():
         if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
-            print("initializing ", m, " with xavier init")
-            nn.init.xavier_uniform(m.weight)
+            # print("initializing {} with {} init.".format(m, init))
+            init_dict[init](m.weight)
             if hasattr(m, 'bias') and m.bias is not None:
-                print("initial bias from ", m, " with zeros")
-                nn.init.constant(m.bias, 0.0)
-        elif isinstance(m, nn.Sequential):
+                # print("initial bias from ", m, " with zeros")
+                nn.init.constant_(m.bias, 0.0)
+        elif isinstance(m, (nn.Sequential, nn.ModuleList, nn.ModuleDict)):
             for mod in m:
-                init_weights(mod)
+                init_weights(mod, init)
 
     return module
 
@@ -892,6 +959,123 @@ class Annealer(nn.Module):
         return float(self.tau)
 
 
+class LinearWarmupWithCosineAnnealing(nn.Module):
+    def __init__(self, decay_steps, warmup_steps, total_steps, alpha=0.0, constant_for_last_k_steps=0):
+        """Linear from [0.0, value_to_scale] followed by cosine decay of [value_to_scale, 0.0] over decay_steps.
+
+        :param decay_steps: period over which to decay the cosine wave.
+        :param warmup_steps: number of steps to linearly increase between.
+        :param total_steps: total steps for model training.
+        :param alpha: minimum value as a fraction of value_to_scale
+        :param constant_for_last_k_steps: number of steps at the end to stay constant.
+        :returns: scaled value_to_scale
+        :rtype: float32
+
+        """
+        super(LinearWarmupWithCosineAnnealing, self).__init__()
+        self.decay_steps = decay_steps
+        self.warmup_steps = warmup_steps
+        self.alpha = alpha
+        self.is_warming_up = False
+
+        # Used for constant at end logic
+        self.constant_for_last_k_steps = constant_for_last_k_steps
+        self.total_steps = total_steps
+        self.step = 0
+
+        # Pre-compute both the linear warmup and cosine annealing
+        self.linear_rate = [i / warmup_steps for i in range(warmup_steps)]
+        self.cosine_rate = [self._cosine_anneal(1.0, i) for i in range(decay_steps)]
+        self.lin_idx = 0
+        self.cos_idx = 0
+
+    def _cosine_anneal(self, value_to_scale, step):
+        """Runs cosine annealing given the """
+        step = np.minimum(step, self.decay_steps)
+        cosine_decay = 0.5 * (1 + np.cos(np.pi * step / self.decay_steps))
+        decay = (1 - self.alpha) * cosine_decay + self.alpha
+        return decay
+
+    def _linear_warmup(self, step):
+        """Simple linear warmup given a step"""
+        return float(step) / float(max(1.0, self.warmup_steps))
+
+    def forward(self, value_to_scale):
+        if self.step >= self.total_steps - self.constant_for_last_k_steps:
+            # Handle last K steps where we want it linear.
+            return value_to_scale
+
+        if self.is_warming_up:
+            # Handle the linear part
+            lin_scalar = self.linear_rate[self.lin_idx]
+            self.lin_idx = self.lin_idx + 1 if self.training else self.lin_idx
+            update = value_to_scale * lin_scalar
+        else:
+            # Handle the cosine part
+            cos_scalar = self.cosine_rate[self.cos_idx]
+            self.cos_idx = self.cos_idx + 1 if self.training else self.cos_idx
+            update = value_to_scale * cos_scalar
+
+        # Reset the corresponding index if needed
+        if self.is_warming_up and self.lin_idx == self.warmup_steps:
+            # Reset the linear index; we are now going to cos-part
+            self.is_warming_up = False
+            self.lin_idx = 0
+        elif not self.is_warming_up and self.cos_idx == self.decay_steps:
+            # Reset the cos-index; we are now going back to linear
+            self.is_warming_up = True
+            self.cos_idx = 0
+
+        # increment the global counter (if training) and return the update.
+        self.step = self.step + 1 if self.training else self.step
+        return update
+
+
+class LinearWarmupWithFixedInterval(nn.Module):
+    def __init__(self, fixed_steps, warmup_steps):
+        """Linear from [0.0, value_to_scale] followed by a fixed rate of value_to_scale over fixed_steps.
+
+        :param fixed_steps: period over which to keep the fixed value for.
+        :param warmup_steps: number of steps to linearly increase between.
+        :returns: scaled value_to_scale
+        :rtype: float32
+
+        """
+        super(LinearWarmupWithFixedInterval, self).__init__()
+        self.fixed_steps = fixed_steps
+        self.warmup_steps = warmup_steps
+        self.is_warming_up = True
+        self.step = 0
+
+        # Pre-compute both the linear warmup and fixed rate
+        self.linear_rate = [i / warmup_steps for i in range(warmup_steps)]
+        self.lin_idx = 0
+        self.fixed_idx = 0
+
+    def _linear_warmup(self, step):
+        """Simple linear warmup given a step"""
+        return float(step) / float(max(1.0, self.warmup_steps))
+
+    def forward(self, value_to_scale):
+        if self.is_warming_up:
+            lin_scalar = self.linear_rate[self.lin_idx]
+            self.lin_idx = self.lin_idx + 1 if self.training else self.lin_idx
+            update = value_to_scale * lin_scalar
+        else:
+            self.fixed_idx = self.fixed_idx + 1 if self.training else self.fixed_idx
+            update = value_to_scale
+
+        # Update whether we are warming up or not
+        if self.is_warming_up and self.lin_idx == self.warmup_steps:
+            self.is_warming_up = False
+            self.lin_idx = 0
+        elif not self.is_warming_up and self.fixed_idx == self.fixed_steps:
+            self.is_warming_up = True
+            self.fixed_idx = 0
+
+        return update
+
+
 class DenseResnet(nn.Module):
     def __init__(self, input_size, output_size, normalization_str="none", activation_fn=nn.ReLU):
         """ Resnet, but with dense layers
@@ -981,7 +1165,8 @@ class AttentionBlock(nn.Module):
 
 class ResnetBlock(nn.Module):
     def __init__(self, in_channels, out_channels, layer_fn, resample=None,
-                 normalization_str="batchnorm", activation_str="relu", **kwargs):
+                 normalization_str="batchnorm", init_norm=True,
+                 activation_str="relu", **kwargs):
         super(ResnetBlock, self).__init__()
         gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, out_channels)}
         norm_fn = functools.partial(
@@ -990,13 +1175,10 @@ class ResnetBlock(nn.Module):
 
         # The actual underlying model
         self.resample = resample
-        self.norm1 = Identity()
-        if normalization_str not in ['weightnorm', 'spectralnorm']:  # handle special case of weight hooks
-            self.norm1 = norm_fn(self.norm1, nfeatures=in_channels)
+        self.init_norm = None
+        if normalization_str not in ['weightnorm', 'spectralnorm'] and init_norm:  # handle special case of weight hooks
+            self.init_norm = norm_fn(Identity(), nfeatures=in_channels)
 
-        # self.conv1 = norm_fn(nn.utils.spectral_norm(layer_fn(in_channels, out_channels)))
-        # self.act = str_to_activ(activation_str)
-        # self.conv2 = nn.utils.spectral_norm(layer_fn(out_channels, out_channels))
         self.conv1 = norm_fn(layer_fn(in_channels, out_channels))
         self.act = str_to_activ(activation_str)
         self.conv2 = layer_fn(out_channels, out_channels)
@@ -1004,12 +1186,13 @@ class ResnetBlock(nn.Module):
         # Learnable skip-connection
         self.skip_connection = None
         if in_channels != out_channels or resample is not None:
-            # self.skip_connection = nn.utils.spectral_norm(layer_fn(in_channels, out_channels,
-            #                                                        kernel_size=1, padding=0))
             self.skip_connection = layer_fn(in_channels, out_channels, kernel_size=1, padding=0)
 
     def forward(self, x):
-        out = self.act(self.norm1(x))
+        out = x
+        if self.init_norm is not None:
+            out = self.act(self.init_norm(x))
+
         if self.resample:
             out = self.resample(out)
             x = self.resample(x)
@@ -1130,6 +1313,11 @@ def build_pixelcnn_decoder(input_size, output_shape, filter_depth=64,
 
 def add_normalization(module, normalization_str, ndims, nfeatures, **kwargs):
     norm_map = {
+        'sync_batchnorm': {
+            1: lambda nfeatures, **kwargs: nn.SyncBatchNorm(nfeatures),
+            2: lambda nfeatures, **kwargs: nn.SyncBatchNorm(nfeatures),
+            3: lambda nfeatures, **kwargs: nn.SyncBatchNorm(nfeatures),
+        },
         'batchnorm': {
             1: lambda nfeatures, **kwargs: nn.BatchNorm1d(nfeatures),
             2: lambda nfeatures, **kwargs: nn.BatchNorm2d(nfeatures),
@@ -1177,30 +1365,6 @@ def add_normalization(module, normalization_str, ndims, nfeatures, **kwargs):
     return nn.Sequential(module, norm_map[normalization_str][ndims](nfeatures, **kwargs))
 
 
-def build_volume_preserving_resnet(input_shape, filter_depth=32,
-                                   activation_fn=nn.SELU, num_layers=4,
-                                   normalization_str="none", **kwargs):
-    assert num_layers % 2 == 0, "need even layers for upscale --> downscale"
-    chans = input_shape[0]
-
-    def _make_layer(inchan, outchan, stride):
-        return ResnetBlock(inchan, outchan, stride=1,
-                           normalization_str=normalization_str,
-                           activation_fn=activation_fn,
-                           downsample=True,
-                           **kwargs)
-
-    normalization_override = 'none' if normalization_str == 'groupnorm' else normalization_str
-    return nn.Sequential(
-        ResnetBlock(chans, filter_depth, stride=1, normalization_str=normalization_override, downsample=True, activation_fn=activation_fn, **kwargs),
-        *[_make_layer(filter_depth*(2**i), filter_depth*(2**(i+1)), stride=1) for i in range(num_layers//2)],
-        *[_make_layer(filter_depth*(2**(i+1)), filter_depth*(2**i), stride=1) for i in range(num_layers//2 - 1, -1, -1)],
-        ResnetBlock(filter_depth, chans, stride=1, normalization_str=normalization_override, downsample=True, activation_fn=activation_fn, **kwargs),
-        # nn.Conv2d(chans, chans, kernel_size=1, stride=1),
-        Squeeze()
-    )
-
-
 def _build_resnet_stack(input_chans, output_chans,
                         layer_fn,
                         base_channels,
@@ -1209,6 +1373,7 @@ def _build_resnet_stack(input_chans, output_chans,
                         strides,
                         resample,
                         resample_fn,
+                        attentions=None,
                         activation_str="relu",
                         normalization_str="none",
                         norm_first_layer=False,
@@ -1225,6 +1390,7 @@ def _build_resnet_stack(input_chans, output_chans,
     :param strides: list of strides for each layer
     :param resample: a list of boolean flags for each layer
     :param resample_fn: the actual function to use for resampling
+    :param attentions: list of attention boolean flags or None
     :param activation_str: what activation function to use
     :param normalization_str: layer normalization type, eg: batchnorm
     :param norm_first_layer: apply normalization to the input layer?
@@ -1233,14 +1399,17 @@ def _build_resnet_stack(input_chans, output_chans,
     :rtype: nn.Sequential
 
     """
-    assert len(resample) == len(kernels) == len(strides)
+    if attentions is None:  # Make attentions the same size as the rest
+        attentions = [None] * len(kernels)
+
+    assert len(resample) == len(kernels) == len(strides) == len(attentions)
 
     # Normalization for pre and post model.
     norm_fn = functools.partial(
         add_normalization, module=Identity(), normalization_str=normalization_str, ndims=2)
     layers = []
 
-    if norm_first_layer:
+    if norm_first_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
         init_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, input_chans)}
         layers.append(norm_fn(nfeatures=input_chans, **init_gn_groups))
         # layers.append(activation_fn())  # TODO(jramapuram): consider this.
@@ -1248,32 +1417,36 @@ def _build_resnet_stack(input_chans, output_chans,
     # build the channel map.
     channels = [input_chans, int(base_channels)]
     for i in range(len(kernels) - 2):  # -1 because last one is output_shape[1]
-        channels.append(int(channel_multiplier*channels[-1]))
+        channels.append(int(channel_multiplier * channels[-1]))
 
     channels.append(output_chans)
 
     # build the rest of the layers, from 0 --> end -1
-    for k, s, r, chan_in, chan_out in zip(kernels, strides, resample, channels[0:-1], channels[1:]):
+    for idx, (k, s, r, a, chan_in, chan_out) in enumerate(zip(kernels, strides, resample, attentions,
+                                                              channels[0:-1], channels[1:])):
         # Build the layer definition
-        layer_fn_i = functools.partial(layer_fn, kernel_size=k, stride=s, padding=1)
+        padding_i = 1 if k > 1 else 0  # 1x1 doesn't need padding.
+        layer_fn_i = functools.partial(layer_fn, kernel_size=k, stride=s, padding=padding_i)
         resample_fn_i = resample_fn if r else lambda x: x
+        init_norm_i = norm_first_layer if idx == 0 else True
 
         # Construct the actual underlying layer
         layer_i = ResnetBlock(chan_in, chan_out,
                               resample=resample_fn_i,
                               layer_fn=layer_fn_i,
                               normalization_str=normalization_str,
+                              init_norm=init_norm_i,
                               activation_str=activation_str)
         layers.append(layer_i)
-        # TODO(jramapuram): consider adding attention
-        # if channel_multiplier < 1:
-        if chan_out >= 4:
+
+        # Add attention block
+        if chan_out >= 4 and a:
             layers.append(Attention(chan_out, layer_fn))
 
     # Add normalization to the final layer if requested
-    if norm_last_layer:
+    if norm_last_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
         final_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, output_chans)}
-        layers.append(norm_fn(nfeatures=input_chans, **final_gn_groups))
+        layers.append(norm_fn(nfeatures=channels[-1], **final_gn_groups))
 
     return nn.Sequential(*layers)
 
@@ -1284,6 +1457,7 @@ def _build_conv_stack(input_chans, output_chans,
                       channel_multiplier,
                       kernels,
                       strides,
+                      attentions=None,
                       activation_str="relu",
                       normalization_str="none",
                       norm_first_layer=False,
@@ -1292,12 +1466,13 @@ def _build_conv_stack(input_chans, output_chans,
     """ Helper to build an arbitrary convolutional decoder.
 
     :param input_chans: number of input channels
-    :param output_shape: [C, H, W] output shape
+    :param output_chans: output channel dimension
     :param layer_fn: what layer function to use?
     :param base_channels: base feature maps
     :param channel_multiplier: expand by this per layer, usually < 1
     :param kernels: list of kernels per layer
     :param strides: list of strides for each layer
+    :param attentions: list of bools for each layer or None
     :param activation_str: what activation function to use
     :param normalization_str: layer normalization type, eg: batchnorm
     :param norm_first_layer: apply normalization to the input layer?
@@ -1306,7 +1481,10 @@ def _build_conv_stack(input_chans, output_chans,
     :rtype: nn.Sequential
 
     """
-    assert len(kernels) == len(strides)
+    if attentions is None:  # Make attentions the same size as the rest
+        attentions = [None] * len(kernels)
+
+    assert len(kernels) == len(strides) == len(attentions)
 
     # Normalization and activation helpers
     norm_fn = functools.partial(
@@ -1314,7 +1492,7 @@ def _build_conv_stack(input_chans, output_chans,
     activation_fn = str_to_activ_module(activation_str)
     layers = []
 
-    if norm_first_layer:
+    if norm_first_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
         init_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, input_chans)}
         layers.append(norm_fn(Identity(), nfeatures=input_chans, **init_gn_groups))
         # layers.append(activation_fn())  # TODO(jramapuram): consider this.
@@ -1327,10 +1505,11 @@ def _build_conv_stack(input_chans, output_chans,
     channels.append(output_chans)
 
     # build each individual layer
-    for idx, (k, s, chan_in, chan_out) in enumerate(zip(kernels, strides, channels[0:-1], channels[1:])):
+    for idx, (k, s, a, chan_in, chan_out) in enumerate(zip(kernels, strides, attentions, channels[0:-1], channels[1:])):
         is_last_layer = (idx == len(kernels) - 1)
         if is_last_layer:
             normalization_str = 'none' if norm_last_layer is False else normalization_str
+            norm_fn = functools.partial(norm_fn, normalization_str=normalization_str)
 
         li_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, chan_out)}
         layer_i = norm_fn(layer_fn(chan_in, chan_out, kernel_size=k, stride=s),
@@ -1338,8 +1517,9 @@ def _build_conv_stack(input_chans, output_chans,
         layers.append(layer_i)
 
         if not is_last_layer:
-            # TODO(jramapuram): consider adding attention; works only with SNConv2d though
-            # layers.append(Attention(chan_out, SNConv2d))
+            if chan_out >= 4 and a:
+                layers.append(Attention(chan_out, layer_fn))
+
             layers.append(activation_fn())
 
     return nn.Sequential(*layers)
@@ -1400,7 +1580,7 @@ class Conv32UpsampleDecoder(nn.Module):
 
         # Handle pre-decoder normalization
         norm_layer = Identity()
-        if norm_first_layer:
+        if norm_first_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
             norm_layer = add_normalization(norm_layer, normalization_str,
                                            ndims=1, nfeatures=input_size)
 
@@ -1443,6 +1623,38 @@ class Conv32UpsampleDecoder(nn.Module):
         return outputs
 
 
+class VolumePreservingResnet(nn.Module):
+    def __init__(self, input_chans, base_channels=256, num_layers=3,
+                 activation_str="relu", normalization_str="none",
+                 norm_first_layer=False, norm_last_layer=False,
+                 layer_fn=nn.Conv2d):
+        super(VolumePreservingResnet, self).__init__()
+        assert isinstance(input_chans, (float, int)), "Expect input_chans as float or int."
+
+        # The encoding part of the model
+        self.model = _build_resnet_stack(input_chans=input_chans,
+                                         output_chans=input_chans,
+                                         layer_fn=layer_fn,
+                                         base_channels=base_channels,
+                                         channel_multiplier=1.0,
+                                         kernels=[1] * num_layers,
+                                         strides=[1] * num_layers,
+                                         resample=[False] * num_layers,
+                                         attentions=[False] * num_layers,
+                                         resample_fn=Identity(),
+                                         activation_str=activation_str,
+                                         normalization_str=normalization_str,
+                                         norm_first_layer=norm_first_layer,
+                                         norm_last_layer=norm_last_layer)
+
+    def forward(self, images):
+        """Iterate over each of the layers to produce an output."""
+        if len(images.shape) == 2:
+            images = images.view(*images.shape, 1, 1)
+
+        return self.model(images)
+
+
 class Resnet32Decoder(nn.Module):
     def __init__(self, input_size, output_chans, base_channels=1024, channel_multiplier=0.5,
                  activation_str="relu", normalization_str="none", norm_first_layer=True,
@@ -1450,16 +1662,21 @@ class Resnet32Decoder(nn.Module):
         super(Resnet32Decoder, self).__init__()
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
 
-        # Handle pre-decoder normalization
-        norm_layer = Identity()
-        if norm_first_layer:
-            norm_layer = add_normalization(norm_layer, normalization_str,
-                                           ndims=1, nfeatures=input_size)
+        # Handle pre-decoder and post-decoder normalization
+        def build_norm_layer(use_norm, feature_size, ndims=1):
+            norm_layer = Identity()
+            if use_norm and normalization_str not in ['weightnorm', 'spectralnorm']:
+                norm_layer = add_normalization(norm_layer, normalization_str,
+                                               ndims=ndims, nfeatures=feature_size)
+            return norm_layer
+
+        init_norm = build_norm_layer(norm_first_layer, input_size)
+        final_norm = build_norm_layer(norm_last_layer, output_chans, ndims=2)
 
         # Project to 4x4 first
         self.mlp_proj = nn.Sequential(
             View([-1, input_size]),
-            norm_layer,
+            init_norm,
             add_normalization(nn.Linear(input_size, input_size*4*4),
                               normalization_str, ndims=1, nfeatures=input_size*4*4),
             str_to_activ_module(activation_str)(),
@@ -1475,11 +1692,16 @@ class Resnet32Decoder(nn.Module):
                                          kernels=[3, 3, 3],
                                          strides=[1, 1, 1],
                                          resample=[True, True, True],
+                                         attentions=[True, True, True],
                                          resample_fn=functools.partial(F.interpolate, scale_factor=2),
                                          activation_str=activation_str,
                                          normalization_str=normalization_str,
                                          norm_first_layer=False,  # Handled already
-                                         norm_last_layer=norm_last_layer)
+                                         norm_last_layer=True)    # We have a final conv
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(output_chans, output_chans, kernel_size=1, stride=1),
+            final_norm
+        )
 
     def forward(self, images, upsample_last=False):
         """Iterate over each of the layers to produce an output."""
@@ -1488,6 +1710,7 @@ class Resnet32Decoder(nn.Module):
 
         outputs = self.mlp_proj(images)
         outputs = self.model(outputs)
+        outputs = self.final_conv(outputs)
 
         if upsample_last:
             return F.upsample(outputs, size=outputs.shape[-2:],
@@ -1504,16 +1727,21 @@ class Resnet64Decoder(nn.Module):
         super(Resnet64Decoder, self).__init__()
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
 
-        # Handle pre-decoder normalization
-        norm_layer = Identity()
-        if norm_first_layer:
-            norm_layer = add_normalization(norm_layer, normalization_str,
-                                           ndims=1, nfeatures=input_size)
+        # Handle pre-decoder and post-decoder normalization
+        def build_norm_layer(use_norm, feature_size, ndims=1):
+            norm_layer = Identity()
+            if use_norm and normalization_str not in ['weightnorm', 'spectralnorm']:
+                norm_layer = add_normalization(norm_layer, normalization_str,
+                                               ndims=ndims, nfeatures=feature_size)
+            return norm_layer
+
+        init_norm = build_norm_layer(norm_first_layer, input_size)
+        final_norm = build_norm_layer(norm_last_layer, output_chans, ndims=2)
 
         # Project to 4x4 first
         self.mlp_proj = nn.Sequential(
             View([-1, input_size]),
-            norm_layer,
+            init_norm,
             add_normalization(nn.Linear(input_size, input_size*4*4),
                               normalization_str, ndims=1, nfeatures=input_size*4*4),
             str_to_activ_module(activation_str)(),
@@ -1529,11 +1757,17 @@ class Resnet64Decoder(nn.Module):
                                          kernels=[3, 3, 3, 3],
                                          strides=[1, 1, 1, 1],
                                          resample=[True, True, True, True],
+                                         attentions=[False, False, False, False],
+                                         # attentions=[True, True, True, True],
                                          resample_fn=functools.partial(F.interpolate, scale_factor=2),
                                          activation_str=activation_str,
                                          normalization_str=normalization_str,
                                          norm_first_layer=False,  # Handled already
                                          norm_last_layer=norm_last_layer)
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(output_chans, output_chans, kernel_size=1, stride=1),
+            final_norm
+        )
 
     def forward(self, images, upsample_last=False):
         """Iterate over each of the layers to produce an output."""
@@ -1542,6 +1776,7 @@ class Resnet64Decoder(nn.Module):
 
         outputs = self.mlp_proj(images)
         outputs = self.model(outputs)
+        outputs = self.final_conv(outputs)
 
         if upsample_last:
             return F.upsample(outputs, size=outputs.shape[-2:],
@@ -1558,16 +1793,21 @@ class Resnet128Decoder(nn.Module):
         super(Resnet128Decoder, self).__init__()
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
 
-        # Handle pre-decoder normalization
-        norm_layer = Identity()
-        if norm_first_layer:
-            norm_layer = add_normalization(norm_layer, normalization_str,
-                                           ndims=1, nfeatures=input_size)
+        # Handle pre-decoder and post-decoder normalization
+        def build_norm_layer(use_norm, feature_size, ndims=1):
+            norm_layer = Identity()
+            if use_norm and normalization_str not in ['weightnorm', 'spectralnorm']:
+                norm_layer = add_normalization(norm_layer, normalization_str,
+                                               ndims=ndims, nfeatures=feature_size)
+            return norm_layer
+
+        init_norm = build_norm_layer(norm_first_layer, input_size)
+        final_norm = build_norm_layer(norm_last_layer, output_chans, ndims=2)
 
         # Project to 4x4 first
         self.mlp_proj = nn.Sequential(
             View([-1, input_size]),
-            norm_layer,
+            init_norm,
             add_normalization(nn.Linear(input_size, input_size*4*4),
                               normalization_str, ndims=1, nfeatures=input_size*4*4),
             str_to_activ_module(activation_str)(),
@@ -1583,11 +1823,16 @@ class Resnet128Decoder(nn.Module):
                                          kernels=[3, 3, 3, 3, 3],
                                          strides=[1, 1, 1, 1, 1],
                                          resample=[True, True, True, True, True],
+                                         attentions=[True, True, True, True, True],
                                          resample_fn=functools.partial(F.interpolate, scale_factor=2),
                                          activation_str=activation_str,
                                          normalization_str=normalization_str,
                                          norm_first_layer=False,  # Handled already
                                          norm_last_layer=norm_last_layer)
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(output_chans, output_chans, kernel_size=1, stride=1),
+            final_norm
+        )
 
     def forward(self, images, upsample_last=False):
         """Iterate over each of the layers to produce an output."""
@@ -1596,6 +1841,7 @@ class Resnet128Decoder(nn.Module):
 
         outputs = self.mlp_proj(images)
         outputs = self.model(outputs)
+        outputs = self.final_conv(outputs)
 
         if upsample_last:
             return F.upsample(outputs, size=outputs.shape[-2:],
@@ -1624,6 +1870,34 @@ class Conv32Decoder(nn.Module):
                                        # strides=[1, 1, 2, 1, 1, 1, 2, 1],  # NEW small ver
                                        # kernels=[5, 4, 4, 4, 4, 1, 1],  # OLD ver
                                        # strides=[1, 2, 1, 2, 1, 1, 1],  # OLD ver
+                                       activation_str=activation_str,
+                                       normalization_str=normalization_str,
+                                       norm_first_layer=norm_first_layer,
+                                       norm_last_layer=norm_last_layer)
+
+    def forward(self, images):
+        """Iterate over each of the layers to produce an output."""
+        if len(images.shape) == 2:
+            images = images.view(*images.shape, 1, 1)
+
+        return self.model(images)
+
+
+class Conv28Decoder(nn.Module):
+    def __init__(self, input_size, output_chans, base_channels=1024, channel_multiplier=0.5,
+                 activation_str="relu", normalization_str="none", norm_first_layer=False,
+                 norm_last_layer=False, layer_fn=nn.ConvTranspose2d):
+        super(Conv28Decoder, self).__init__()
+        assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
+
+        # The main model
+        self.model = _build_conv_stack(input_chans=input_size,
+                                       output_chans=output_chans,
+                                       layer_fn=layer_fn,
+                                       base_channels=base_channels,
+                                       channel_multiplier=channel_multiplier,
+                                       kernels=[4, 4, 4, 4, 1],
+                                       strides=[1, 2, 1, 2, 1],
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=norm_first_layer,
@@ -1717,30 +1991,27 @@ class Resnet128Encoder(nn.Module):
                                          activation_str=activation_str,
                                          normalization_str=normalization_str,
                                          norm_first_layer=False,  # raw data
-                                         norm_last_layer=False)   # handled with MLP
+                                         norm_last_layer=True)   # input to 1x1
 
         # Handle norm_last_layer if requested
         norm_layer = Identity()
-        if norm_last_layer:
+        if norm_last_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
             norm_layer = add_normalization(norm_layer, normalization_str,
                                            ndims=1, nfeatures=input_chans)
 
         # Do a final linear projection on the pooled representation
-        self.mlp_proj = nn.Sequential(
-            View([-1, output_size]),
-            add_normalization(nn.Linear(output_size, output_size),
-                              normalization_str, ndims=1, nfeatures=output_size),
-            str_to_activ_module(activation_str)(),
-            norm_layer,
-            View([-1, output_size, 1, 1]),
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(output_size, output_size, kernel_size=1),
+            norm_layer
         )
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
         assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
         outputs = self.model(images)
-        outputs = torch.sum(self.act(outputs), [-2, -1])
-        outputs = self.mlp_proj(outputs)
+        outputs = torch.mean(self.act(outputs), [-2, -1])     # pool over x and y
+        outputs = outputs.view(list(outputs.shape) + [1, 1])  # un-flatten and do 1x1
+        outputs = self.final_conv(outputs)                    # 1x1 conv
         return outputs
 
 
@@ -1768,30 +2039,27 @@ class Resnet64Encoder(nn.Module):
                                          activation_str=activation_str,
                                          normalization_str=normalization_str,
                                          norm_first_layer=False,  # raw data
-                                         norm_last_layer=False)   # handled with MLP
+                                         norm_last_layer=True)    # input to 1x1
 
         # Handle norm_last_layer if requested
         norm_layer = Identity()
-        if norm_last_layer:
+        if norm_last_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
             norm_layer = add_normalization(norm_layer, normalization_str,
                                            ndims=1, nfeatures=input_chans)
 
         # Do a final linear projection on the pooled representation
-        self.mlp_proj = nn.Sequential(
-            View([-1, output_size]),
-            add_normalization(nn.Linear(output_size, output_size),
-                              normalization_str, ndims=1, nfeatures=output_size),
-            str_to_activ_module(activation_str)(),
-            norm_layer,
-            View([-1, output_size, 1, 1]),
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(output_size, output_size, kernel_size=1),
+            norm_layer
         )
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
         assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
         outputs = self.model(images)
-        outputs = torch.sum(self.act(outputs), [-2, -1])
-        outputs = self.mlp_proj(outputs)
+        outputs = torch.mean(self.act(outputs), [-2, -1])     # pool over x and y
+        outputs = outputs.view(list(outputs.shape) + [1, 1])  # un-flatten and do 1x1
+        outputs = self.final_conv(outputs)                    # 1x1 conv
         return outputs
 
 
@@ -1819,69 +2087,103 @@ class Resnet32Encoder(nn.Module):
                                          activation_str=activation_str,
                                          normalization_str=normalization_str,
                                          norm_first_layer=False,  # raw data
-                                         norm_last_layer=False)   # handled with MLP
+                                         norm_last_layer=True)    # input to 1x1
 
         # Handle norm_last_layer if requested
         norm_layer = Identity()
-        if norm_last_layer:
+        if norm_last_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
             norm_layer = add_normalization(norm_layer, normalization_str,
-                                           ndims=1, nfeatures=input_chans)
+                                           ndims=2, nfeatures=input_chans)
 
         # Do a final linear projection on the pooled representation
-        self.mlp_proj = nn.Sequential(
-            View([-1, output_size]),
-            add_normalization(nn.Linear(output_size, output_size),
-                              normalization_str, ndims=1, nfeatures=output_size),
-            str_to_activ_module(activation_str)(),
-            norm_layer,
-            View([-1, output_size, 1, 1]),
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(output_size, output_size, kernel_size=1),
+            norm_layer
         )
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
         assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
         outputs = self.model(images)
-        outputs = torch.sum(self.act(outputs), [-2, -1])
-        outputs = self.mlp_proj(outputs)
+        outputs = torch.mean(self.act(outputs), [-2, -1])     # pool over x and y
+        outputs = outputs.view(list(outputs.shape) + [1, 1])  # un-flatten and do 1x1
+        outputs = self.final_conv(outputs)                    # 1x1 conv
         return outputs
 
 
 class TorchvisionEncoder(nn.Module):
     """Wraps torchvision models such as Resnet50, etc."""
-    def __init__(self, output_size, activation_str="relu",
-                 normalization_str="none", norm_last_layer=False,
-                 layer_fn=models.resnet50, pretrained=False, **unused_args):
+    def __init__(self, pretrained_output_size, output_size, latent_size=512, activation_str="relu",
+                 normalization_str="none", norm_first_layer=False, norm_last_layer=False,
+                 layer_fn=models.resnet50, pretrained=False, freeze_base=False,
+                 **unused_args):
+        """ Wrap a torchvision encoder such as resnet50 and adds an FC.
+
+        :param pretrained_output_size: output size of the pretrained model
+        :param output_size: output size for FC projection
+        :param latent_size: latent size for FC projection
+        :param activation_str: activation for FC layers
+        :param normalization_str: normalization for FC
+        :param norm_first_layer: norm input to FC (output of base model)
+        :param norm_last_layer: norm output of FC
+        :param layer_fn: layer fn for FC
+        :param pretrained: pull pretrained classifier weights for torchvision model
+        :param freeze_base: prevent updating of gradients of base model
+        :returns: module with FC attached
+        :rtype: nn.Module
+
+        """
         super(TorchvisionEncoder, self).__init__()
         self.output_size = output_size
-        self.activation = str_to_activ_module(activation_str)
+        self.latent_size = latent_size
+        self.norm_first_layer = norm_first_layer
+        self.norm_last_layer = norm_last_layer
+        self.normalization_str = normalization_str
+        self.activation_str = activation_str
 
+        # Compute the input image size; TODO(jramapuram): do we need this for non-pretrained?
+        # Ideally the pooling layer should auto-magically handle this for us.
+        model_input_size = (299, 299) if layer_fn == models.inception_v3 else (224, 224)
+        self.required_input_shape = model_input_size if pretrained else None
+
+        # Build the torchvision model and (optionally) load the pretained weights.
         self.model = nn.Sequential(
             *list(layer_fn(pretrained=pretrained).children())[:-1]
         )
+        if normalization_str == 'sync_batchnorm':
+            self.model = nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
+
+        # Freeze base model if requested
+        if freeze_base:
+            for param in self.model.parameters():
+                param.requires_grad = False
 
         # Lazy initialize this.
-        self.fc = None
-
-        # Norm last layer if requested
-        self.norm_fn = None
-        if norm_last_layer:
-            gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, output_size)}
-            self.norm_fn = functools.partial(
-                add_normalization, normalization_str=normalization_str,
-                ndims=2, nfeatures=output_size, **gn_groups)
-
-    def _lazy_init_fc(self, input_size):
-        if self.fc is None:
-            self.fc = nn.Sequential(self.activation(), nn.Linear(input_size, self.output_size))
-            if self.norm_fn is not None:
-                self.fc = self.norm_fn(self.fc, nfeatures=self.output_size)
+        self.fc = _build_dense(input_size=pretrained_output_size,
+                               output_size=self.output_size,
+                               latent_size=self.latent_size,
+                               num_layers=3,  # XXX(jramapuram): hardcoded for now
+                               layer_fn=nn.Linear,
+                               activation_str=self.activation_str,
+                               normalization_str=self.normalization_str,
+                               norm_first_layer=self.norm_first_layer,
+                               norm_last_layer=self.norm_last_layer)
 
     def forward(self, images):
-        # if images.shape[2] != 224:
-        #     images = F.interpolate(images, size=(224, 244), mode='bilinear', align_corners=True)
+        """Infers using the given torchvision model and projects with the FC.
+
+        :param images: image tensor
+        :param required_input_shape: None or tuple of (w, h)
+        :returns: fc output logits
+        :rtype: torch.tensor
+
+        """
+        if self.required_input_shape is not None and (images.shape[-2] != self.required_input_shape[-2]
+                                                      and images.shape[-1] != self.required_input_shape[-1]):
+            images = F.interpolate(images, size=self.required_input_shape,
+                                   mode='bilinear', align_corners=True)
 
         outputs = self.model(images)
-        self._lazy_init_fc(outputs.shape[1])
         return self.fc(outputs.squeeze())
 
 
@@ -1903,6 +2205,32 @@ class Conv32Encoder(nn.Module):
                                        # strides=[1, 2, 1, 2, 1, 1],
                                        kernels=[4, 4, 3, 3, 3],
                                        strides=[2, 1, 2, 1, 1],
+                                       activation_str=activation_str,
+                                       normalization_str=normalization_str,
+                                       norm_first_layer=False,  # dont norm inputs
+                                       norm_last_layer=norm_last_layer)
+
+    def forward(self, images):
+        """Iterate over each of the layers to produce an output."""
+        assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
+        return self.model(images)
+
+
+class Conv28Encoder(nn.Module):
+    def __init__(self, input_chans, output_size, base_channels=32, channel_multiplier=2,
+                 activation_str="relu", normalization_str="none", norm_last_layer=False,
+                 layer_fn=nn.Conv2d):
+        super(Conv28Encoder, self).__init__()
+        assert isinstance(output_size, (float, int)), "Expect output_size as float or int."
+
+        # The main model
+        self.model = _build_conv_stack(input_chans=input_chans,
+                                       output_chans=output_size,
+                                       layer_fn=layer_fn,
+                                       base_channels=base_channels,
+                                       channel_multiplier=channel_multiplier,
+                                       kernels=[3, 4, 4, 4, 1],
+                                       strides=[1, 2, 2, 2, 1],
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=False,  # dont norm inputs
@@ -1969,7 +2297,7 @@ class Conv128Encoder(nn.Module):
 def _build_dense(input_size,
                  output_size,
                  layer_fn=nn.Linear,
-                 latent_size=512, num_layers=2,
+                 latent_size=512, num_layers=3,
                  activation_str="elu", normalization_str="none",
                  norm_first_layer=False, norm_last_layer=False):
     ''' flatten --> layer + norm --> activation -->... --> Linear output --> view'''
@@ -1982,12 +2310,12 @@ def _build_dense(input_size,
 
     # add initial norm if requested
     init_norm_layer = Identity()
-    if norm_first_layer:
+    if norm_first_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
         init_norm_layer = norm_fn(init_norm_layer, nfeatures=input_size)
 
     # add final norm if requested
     final_norm_layer = Identity()
-    if norm_last_layer:
+    if norm_last_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
         final_norm_layer = norm_fn(final_norm_layer, nfeatures=output_size)
 
     layers = [('init_norm', init_norm_layer),
@@ -2004,91 +2332,16 @@ def _build_dense(input_size,
     layers.append(('final_norm', final_norm_layer))
     return nn.Sequential(OrderedDict(layers))
 
-# def _build_dense(input_shape=None, input_size=None,    # provide either input_shape or input_size
-#                  output_shape=None, output_size=None,  # provide either output_shape or output_size
-#                  layer_fn=nn.Linear,
-#                  latent_size=512, num_layers=2,
-#                  activation_str="elu", normalization_str="none",
-#                  norm_first_layer=False, norm_last_layer=False,
-#                  disable_flatten=False, **unused_kwargs):
-#     ''' flatten --> layer + norm --> activation -->... --> Linear output --> view'''
-#     assert normalization_str != "groupnorm", "Groupnorm not supported for dense models."
-
-#     # Sanity on output_size + output_shape
-#     assert output_shape is not None or output_size is not None, "Need output_shape or output_size."
-#     if output_size is not None:
-#         assert output_shape is None, "Only provide output_shape or output_size."
-
-#     if output_shape is not None:
-#         assert output_size is not None, "Only provide output_shape or output_size."
-
-#     # Sanity on input_size + input_shape
-#     assert input_shape is not None or input_size is not None, "Need input_shape or input_size."
-#     if input_size is not None:
-#         assert input_shape is None, "Only provide input_shape or input_size."
-
-#     if input_shape is not None:
-#         assert input_size is not None, "Only provide input_shape or input_size."
-
-#     # Sizing computations
-#     input_shape = input_size if input_size is not None else input_shape
-#     input_flat = int(np.prod(input_shape))
-#     output_flat = int(np.prod(output_shape)) if output_shape is not None else output_size
-#     if output_shape is not None:
-#         output_shape = [output_shape] if not isinstance(output_shape, list) else output_shape
-#     else:
-#         output_shape = [output_size]
-
-#     # Activation and normalization functions
-#     activation_fn = str_to_activ_module(activation_str)
-#     norm_fn = functools.partial(
-#         add_normalization, normalization_str=normalization_str, ndims=1)
-
-#     # don't flatten if we passed 'disable_flatten' in kwargs
-#     if disable_flatten and input_flat == input_shape:
-#         view_init_layer = Identity()
-#         view_final_layer = Identity()
-#     else:
-#         view_init_layer = View([-1, input_flat])
-#         view_final_layer = View([-1] + output_shape)
-
-#     # add initial norm if requested
-#     if norm_first_layer:
-#         view_init_layer = norm_fn(view_init_layer, nfeatures=input_flat)
-
-#     # add final norm if requested
-#     norm_final_layer = Identity()
-#     if norm_last_layer:
-#         norm_final_layer = norm_fn(norm_final_layer, nfeatures=output_flat)
-
-#     layers = [('view0', view_init_layer),
-#               ('l0', add_normalization(layer_fn(input_flat, latent_size),
-#                                        normalization_str, 1, latent_size, num_groups=32)),
-#               ('act0', activation_fn())]
-
-#     for i in range(num_layers - 2):  # 2 for init layer[above] + final layer[below]
-#         layers.append(
-#             ('l{}'.format(i+1), add_normalization(layer_fn(latent_size, latent_size),
-#                                                   normalization_str, 1, latent_size, num_groups=32))
-#         )
-#         layers.append(('act{}'.format(i+1), activation_fn()))
-
-#     layers.append(('output', layer_fn(latent_size, output_flat)))
-#     layers.append(('output_norm', norm_final_layer))
-#     layers.append(('viewout', view_final_layer))
-
-#     return nn.Sequential(OrderedDict(layers))
-
 
 class Dense(nn.Module):
     def __init__(self, input_shape, output_shape,
-                 latent_size=512, num_layers=2,
+                 latent_size=512, num_layers=3,
                  activation_str="relu", normalization_str="none",
                  norm_first_layer=False, norm_last_layer=False,
                  layer_fn=nn.Linear):
         super(Dense, self).__init__()
-        assert isinstance(input_shape, list), "input_shape needs to be a list."
-        assert isinstance(output_shape, list), "output_shape needs to be a list."
+        input_shape = [input_shape] if not isinstance(input_shape, (list, tuple)) else input_shape
+        output_shape = [output_shape] if not isinstance(output_shape, (list, tuple)) else output_shape
         input_size = int(np.prod(input_shape))
         output_size = int(np.prod(output_shape))
 
@@ -2113,7 +2366,7 @@ class Dense(nn.Module):
 
 class DenseEncoder(Dense):
     def __init__(self, input_shape, output_size,
-                 latent_size=512, num_layers=2,
+                 latent_size=512, num_layers=3,
                  activation_str="relu", normalization_str="none",
                  norm_first_layer=False, norm_last_layer=False,
                  layer_fn=nn.Linear):
@@ -2130,7 +2383,7 @@ class DenseEncoder(Dense):
 
 class DenseDecoder(Dense):
     def __init__(self, input_size, output_shape,
-                 latent_size=512, num_layers=2,
+                 latent_size=512, num_layers=3,
                  activation_str="relu", normalization_str="none",
                  norm_first_layer=False, norm_last_layer=False,
                  layer_fn=nn.Linear):
@@ -2145,29 +2398,32 @@ class DenseDecoder(Dense):
                                            layer_fn=layer_fn)
 
 
-def get_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
-                encoder_layer_type: str = 'conv',
-                encoder_base_channels: int = 32,  # For conv models
-                encoder_channel_multiplier: int = 2,
-                latent_size: int = 512,   # For dense models
-                dense_normalization: str = 'none',
-                conv_normalization: str = 'none',
-                disable_gated: bool = True,
-                norm_first_layer: bool = False,
-                norm_last_layer: bool = False,
-                activation: str = 'relu',
-                name: str = 'encoder',
-                **unused_kwargs):
+def get_conv_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
+                     encoder_layer_type: str = 'conv',
+                     encoder_base_channels: int = 32,  # For conv models
+                     encoder_channel_multiplier: int = 2,
+                     latent_size: int = 512,   # For dense models
+                     dense_normalization: str = 'none',
+                     conv_normalization: str = 'none',
+                     disable_gated: bool = True,
+                     norm_first_layer: bool = False,
+                     norm_last_layer: bool = False,
+                     activation: str = 'relu',
+                     pretrained: bool = False,
+                     name: str = 'encoder',
+                     **unused_kwargs):
     '''Helper to return the correct encoder function.'''
     conv_size_dict = {
         128: Conv128Encoder,
         64: Conv64Encoder,
         32: Conv32Encoder,
+        28: Conv28Encoder,
     }
     resnet_size_dict = {
         128: Resnet128Encoder,
         64: Resnet64Encoder,
         32: Resnet32Encoder,
+        28: lambda **kwargs: None  # XXX: fix
     }
     chans, image_size = input_shape[0], input_shape[-1]
 
@@ -2176,10 +2432,14 @@ def get_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
     net_map = {
         'resnet50': {
             False: functools.partial(TorchvisionEncoder,
+                                     pretrained_output_size=2048,  # r50 avg-pool size
+                                     latent_size=latent_size,
                                      activation_str=activation,
                                      normalization_str=conv_normalization,
+                                     norm_first_layer=norm_first_layer,
                                      norm_last_layer=norm_last_layer,
-                                     pretrained=False,
+                                     pretrained=pretrained,
+                                     freeze_base=False,  # TODO(jramapuram): parameterize
                                      layer_fn=models.resnet50),
         },
         'resnet': {
@@ -2255,12 +2515,57 @@ def get_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
                                      activation_str=activation,
                                      layer_fn=CoordConv),
         },
+    }
+
+    fn = net_map[encoder_layer_type][not disable_gated]
+    print("using {} {} for {}".format(
+        "gated" if not disable_gated else "standard",
+        encoder_layer_type,
+        name
+    ))
+    return fn
+
+
+def get_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W]
+                encoder_layer_type: str = 'conv',
+                encoder_base_channels: int = 32,  # For conv models
+                encoder_channel_multiplier: int = 2,
+                latent_size: int = 512,   # For dense models
+                num_layers: int = 3,      # For dense models
+                dense_normalization: str = 'none',
+                conv_normalization: str = 'none',
+                disable_gated: bool = True,
+                norm_first_layer: bool = False,
+                norm_last_layer: bool = False,
+                activation: str = 'relu',
+                pretrained: bool = False,
+                name: str = 'encoder',
+                **unused_kwargs):
+    '''Helper to return the correct encoder function.'''
+    if encoder_layer_type != 'dense':
+        return get_conv_encoder(input_shape=input_shape,
+                                encoder_layer_type=encoder_layer_type,
+                                encoder_base_channels=encoder_base_channels,
+                                encoder_channel_multiplier=encoder_channel_multiplier,
+                                latent_size=latent_size,
+                                dense_normalization=dense_normalization,
+                                conv_normalization=conv_normalization,
+                                disable_gated=disable_gated,
+                                norm_first_layer=norm_first_layer,
+                                norm_last_layer=norm_last_layer,
+                                activation=activation,
+                                pretrained=pretrained,
+                                name=name, **unused_kwargs)
+
+    # Handle dense model building separately since there are no size restrictions.
+    # The returned encoder still needs the CTOR, eg: enc(input_shape)
+    net_map = {
         'dense': {
             # True for gated, False for non-gated
             True: functools.partial(DenseEncoder,
                                     input_shape=input_shape,
                                     latent_size=latent_size,
-                                    num_layers=3,  # XXX(jramapuram): hardcoded, can be over-ridden during init
+                                    num_layers=num_layers,
                                     norm_first_layer=norm_first_layer,
                                     norm_last_layer=norm_last_layer,
                                     activation_str=activation,
@@ -2269,7 +2574,7 @@ def get_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
             False: functools.partial(DenseEncoder,
                                      input_shape=input_shape,
                                      latent_size=latent_size,
-                                     num_layers=3,  # XXX(jramapuram): hardcoded, can be over-ridden during init
+                                     num_layers=num_layers,
                                      norm_first_layer=norm_first_layer,
                                      norm_last_layer=norm_last_layer,
                                      activation_str=activation,
@@ -2287,30 +2592,32 @@ def get_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
     return fn
 
 
-def get_decoder(output_shape: Tuple[int, int, int],  # output image shape [B, H, W]
-                decoder_layer_type: str = 'conv',
-                decoder_base_channels: int = 1024,      # For conv models
-                decoder_channel_multiplier: int = 0.5,  # Decoding shrinks channels
-                latent_size: int = 512,         # For dense models
-                dense_normalization: str = 'none',
-                conv_normalization: str = 'none',
-                disable_gated: bool = True,
-                norm_first_layer: bool = False,
-                norm_last_layer: bool = False,
-                activation: str = 'relu',
-                name: str = 'decoder',
-                **unused_kwargs):
+def get_conv_decoder(output_shape: Tuple[int, int, int],  # output image shape [B, H, W]
+                     decoder_layer_type: str = 'conv',
+                     decoder_base_channels: int = 1024,      # For conv models
+                     decoder_channel_multiplier: int = 0.5,  # Decoding shrinks channels
+                     latent_size: int = 512,         # For dense models
+                     dense_normalization: str = 'none',
+                     conv_normalization: str = 'none',
+                     disable_gated: bool = True,
+                     norm_first_layer: bool = True,
+                     norm_last_layer: bool = False,
+                     activation: str = 'relu',
+                     name: str = 'decoder',
+                     **unused_kwargs):
     '''Helper to return the correct decoder function.'''
     conv_size_dict = {
         128: Conv128Decoder,
         64: Conv64Decoder,
         32: Conv32Decoder,
         # 32: Conv32UpsampleDecoder,
+        28: Conv28Decoder,
     }
     resnet_size_dict = {
         128: Resnet128Decoder,
         64: Resnet64Decoder,
         32: Resnet32Decoder,
+        28: lambda **kwargs: None  # XXX: fix
     }
     image_size = output_shape[-1]
 
@@ -2398,32 +2705,9 @@ def get_decoder(output_shape: Tuple[int, int, int],  # output image shape [B, H,
                                      activation_str=activation,
                                      layer_fn=CoordConvTranspose),
         },
-        'dense': {
-            # True for gated, False for non-gated
-            True: functools.partial(DenseDecoder,  # _build_dense,
-                                    output_shape=output_shape,
-                                    latent_size=latent_size,
-                                    num_layers=3,  # XXX(jramapuram): hardcoded, can be over-ridden during init
-                                    norm_first_layer=norm_first_layer,
-                                    norm_last_layer=norm_last_layer,
-                                    activation_str=activation,
-                                    normalization_str=dense_normalization,
-                                    layer_fn=GatedDense),
-            False: functools.partial(DenseDecoder,  # _build_dense,
-                                     output_shape=output_shape,
-                                     latent_size=latent_size,
-                                     num_layers=3,  # XXX(jramapuram): hardcoded, can be over-ridden during init
-                                     norm_first_layer=False,  # input data
-                                     norm_last_layer=norm_last_layer,
-                                     activation_str=activation,
-                                     normalization_str=dense_normalization,
-                                     layer_fn=nn.Linear)
-        },
     }
 
-    # NOTE: pixelcnn is added later, override here
-    layer_type = "conv" if decoder_layer_type == "pixelcnn" else decoder_layer_type
-    fn = net_map[layer_type][not disable_gated]
+    fn = net_map[decoder_layer_type][not disable_gated]
     print("using {} {} for {}".format(
         "gated" if not disable_gated else "standard",
         decoder_layer_type,
@@ -2432,13 +2716,101 @@ def get_decoder(output_shape: Tuple[int, int, int],  # output image shape [B, H,
     return fn
 
 
-def add_weight_decay(model, weight_decay=1e-5, skip_list=()):
-    # Tweaked from https://bit.ly/3dzyqod
-    if weight_decay == 0:
-        return model.parameters()
+def get_decoder(output_shape: Union[int, Tuple[int, int, int]],  # output image shape [B, H, W]
+                decoder_layer_type: str = 'conv',
+                decoder_base_channels: int = 1024,      # For conv models
+                decoder_channel_multiplier: int = 0.5,  # Decoding shrinks channels
+                latent_size: int = 512,   # For dense models
+                num_layers: int = 3,      # For dense models
+                dense_normalization: str = 'none',
+                conv_normalization: str = 'none',
+                disable_gated: bool = True,
+                norm_first_layer: bool = True,
+                norm_last_layer: bool = True,
+                activation: str = 'relu',
+                name: str = 'decoder',
+                **unused_kwargs):
+    '''Helper to return the correct decoder function.'''
+    if decoder_layer_type != 'dense':
+        return get_conv_decoder(output_shape=output_shape,
+                                decoder_layer_type=decoder_layer_type,
+                                decoder_base_channels=decoder_base_channels,
+                                decoder_channel_multiplier=decoder_channel_multiplier,
+                                latent_size=latent_size,
+                                dense_normalization=dense_normalization,
+                                conv_normalization=conv_normalization,
+                                disable_gated=disable_gated,
+                                norm_first_layer=norm_first_layer,
+                                norm_last_layer=norm_last_layer,
+                                activation=activation,
+                                name=name, **unused_kwargs)
 
-    decay = []
-    no_decay = []
+    # Handle dense model building separately since there are no size restrictions.
+    # The returned decoder still needs the CTOR, eg: dec(input_size)
+    net_map = {
+        'dense': {
+            # True for gated, False for non-gated
+            True: functools.partial(DenseDecoder,
+                                    output_shape=output_shape,
+                                    latent_size=latent_size,
+                                    num_layers=num_layers,
+                                    norm_first_layer=norm_first_layer,
+                                    norm_last_layer=norm_last_layer,
+                                    activation_str=activation,
+                                    normalization_str=dense_normalization,
+                                    layer_fn=GatedDense),
+            False: functools.partial(DenseDecoder,
+                                     output_shape=output_shape,
+                                     latent_size=latent_size,
+                                     num_layers=num_layers,
+                                     norm_first_layer=True,  # input data
+                                     norm_last_layer=norm_last_layer,
+                                     activation_str=activation,
+                                     normalization_str=dense_normalization,
+                                     layer_fn=nn.Linear)
+        },
+    }
+
+    fn = net_map[decoder_layer_type][not disable_gated]
+    print("using {} {} for {}".format(
+        "gated" if not disable_gated else "standard",
+        decoder_layer_type,
+        name
+    ))
+    return fn
+
+
+def get_polyak_prediction(model, pred_fn):
+    """Backs up the model, sets EMA mean parameters, runs the prediction and returns."""
+    ema_mean = model.polyak_ema.ema_val
+    original_params = nn.utils.parameters_to_vector(model.parameters())
+    nn.utils.vector_to_parameters(ema_mean, model.parameters())
+    preds = pred_fn()
+    nn.utils.vector_to_parameters(original_params, model.parameters())
+    return preds
+
+
+def polyak_ema_parameters(model, decay=0.9999):
+    """Apply Polyak averaging to the provided model with given decay."""
+    assert hasattr(model, 'polyak_ema'), "model needs to create EMA op as a member and initialize it."
+    model.polyak_ema(nn.utils.parameters_to_vector(model.parameters()))
+
+
+def add_weight_decay(model, weight_decay=1e-5, skip_list=()):
+    """Splits param group into weight_decay / non-weight decay.
+       Tweaked from https://bit.ly/3dzyqod
+
+    :param model: the torch.nn model
+    :param weight_decay: weight decay term
+    :param skip_list: extra modules (besides BN/bias) to skip
+    :returns: split param group into weight_decay/not-weight decay
+    :rtype: list(dict)
+
+    """
+    # if weight_decay == 0:
+    #     return model.parameters()
+
+    decay, no_decay = [], []
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
@@ -2448,11 +2820,11 @@ def add_weight_decay(model, weight_decay=1e-5, skip_list=()):
         else:
             decay.append(param)
     return [
-        {'params': no_decay, 'weight_decay': 0.},
-        {'params': decay, 'weight_decay': weight_decay}]
+        {'params': no_decay, 'weight_decay':  0, 'ignore': True},
+        {'params': decay, 'weight_decay': weight_decay, 'ignore': False}]
 
 
-def append_save_and_load_fns(model, optimizer, grapher, args):
+def append_save_and_load_fns(model, optimizer, scheduler, grapher, args):
     """ Hax to add save and load functionality to use with early-stopping module.
 
     :param model: any torch module
@@ -2465,7 +2837,7 @@ def append_save_and_load_fns(model, optimizer, grapher, args):
     """
     from .utils import get_name
 
-    def load(model, optimizer, grapher, **kwargs):
+    def load(model, optimizer, scheduler, grapher, **kwargs):
         """ load the model if it exists, returns the cached dictionary
 
         :param model: the nn.Module
@@ -2480,30 +2852,38 @@ def append_save_and_load_fns(model, optimizer, grapher, args):
         if os.path.isdir(args.model_dir):
             model_filename = os.path.join(args.model_dir, prefix + get_name(args) + ".th")
             if os.path.isfile(model_filename):
-                print("loading existing model: {}".format(model_filename))
+                # set the map location to the current gpu (in a distributed setting).
+                map_location = None
+                if args.gpu is not None and args.cuda:
+                    map_location = 'cuda:{}'.format(args.gpu)
+
+                print("loading existing model: {} to map-loc {}".format(model_filename, map_location))
 
                 # load the full dictionary and set the model and optimizer params
-                save_dict = torch.load(model_filename)
+                save_dict = torch.load(model_filename, map_location=map_location)
                 model.load_state_dict(save_dict['model'])
                 optimizer.load_state_dict(save_dict['optimizer'])
-                grapher.state_dict = save_dict['grapher']
+                scheduler.load_state_dict(save_dict['scheduler'])
+                if grapher is not None:
+                    grapher.state_dict = save_dict['grapher']
 
                 # remove the keys that we used to load the models
                 del save_dict['model']
                 del save_dict['optimizer']
+                del save_dict['scheduler']
             else:
                 print("{} does not exist...".format(model_filename))
 
         # restore the visdom grapher
-        if 'grapher' in save_dict and save_dict['grapher'] \
+        if grapher is not None and 'grapher' in save_dict and save_dict['grapher'] \
            and 'scalars' in save_dict['grapher'] and save_dict['grapher']['scalars']:
             grapher.set_data(save_dict['grapher']['scalars'], save_dict['grapher']['windows'])
             del save_dict['grapher']
 
         return save_dict
 
-    def save(model, optimizer, grapher, **kwargs):
-        """ Saves a model and optimizer to a file.
+    def save(model, optimizer, scheduler, grapher, **kwargs):
+        """ Saves a model and optimizer (w/scheduler) to a file.
 
             Optional params:
                   -  'overwrite' : force over-writes a savefile
@@ -2512,6 +2892,7 @@ def append_save_and_load_fns(model, optimizer, grapher, args):
 
         :param model: nn.Module
         :param optimizer: nn.Optim
+        :param scheduler: optim.lr_scheduler
         :returns: None
         :rtype: None
 
@@ -2537,12 +2918,13 @@ def append_save_and_load_fns(model, optimizer, grapher, args):
                 {**{
                     'model': model.state_dict(),
                     'optimizer': optimizer.state_dict(),
+                    'scheduler': scheduler.state_dict(),
                     'args': args,
                     'grapher': {'scalars': scalar_dict, 'windows': window_dict}
                 }, **kwargs},
                 model_filename
             )
 
-    model.load = functools.partial(load, model=model, grapher=grapher, optimizer=optimizer)
-    model.save = functools.partial(save, model=model, grapher=grapher, optimizer=optimizer)
+    model.load = functools.partial(load, model=model, grapher=grapher, optimizer=optimizer, scheduler=scheduler)
+    model.save = functools.partial(save, model=model, grapher=grapher, optimizer=optimizer, scheduler=scheduler)
     return model
