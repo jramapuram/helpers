@@ -1,14 +1,13 @@
 # coding: utf-8
 
 import os
+import socket
 import torch
 import torchvision
 import torch.nn as nn
 import numpy as np
-import scipy as sp
 import contextlib
 import torch.nn.functional as F
-import torch.distributions as D
 
 from itertools import chain
 from collections import Counter
@@ -31,6 +30,7 @@ def flatten(input_list):
 
     """
     return list(chain.from_iterable(input_list))
+
 
 def pca_reduce(x, num_reduce):
     '''reduced matrix X to num_reduce features'''
@@ -79,56 +79,9 @@ def squeeze_expand_dim(tensor, axis):
 
 
 def inv_perm(arr, perm):
+    """Given an array [B, *] and a permutation array [B], invert the operation returning array"""
     idx_perm = torch.cat([(perm == i).nonzero() for i in range(len(perm))], 0).squeeze()
     return arr[idx_perm]
-
-
-def normalize_images(imgs, mu=None, sigma=None, eps=1e-9):
-    ''' normalize imgs with provided mu /sigma
-        or computes them and returns with the normalized
-       images and tabulated mu / sigma'''
-    if mu is None:
-        if len(imgs.shape) == 4:
-            chans = imgs.shape[1]
-            mu = np.asarray(
-                [np.mean(imgs[:, i, :, :]) for i in range(chans)]
-            ).reshape(1, -1, 1, 1)
-        elif len(imgs.shape) == 5:  # glimpses
-            chans = imgs.shape[2]
-            mu = np.asarray(
-                [np.mean(imgs[:, :, i, :, :]) for i in range(chans)]
-            ).reshape(1, 1, -1, 1, 1)
-            sigma = np.asarray(
-                [np.std(imgs[:, :, i, :, :]) for i in range(chans)]
-            ).reshape(1, 1, -1, 1, 1)
-        else:
-            raise Exception("unknown number of dims for normalization")
-
-    if sigma is None:
-        if len(imgs.shape) == 4:
-            chans = imgs.shape[1]
-            sigma = np.asarray(
-                [np.std(imgs[:, i, :, :]) for i in range(chans)]
-            ).reshape(1, -1, 1, 1)
-        elif len(imgs.shape) == 5:  # glimpses
-            chans = imgs.shape[2]
-            sigma = np.asarray(
-                [np.std(imgs[:, :, i, :, :]) for i in range(chans)]
-            ).reshape(1, 1, -1, 1, 1)
-        else:
-            raise Exception("unknown number of dims for normalization")
-
-    return (imgs - mu) / (sigma + eps), [mu, sigma]
-
-
-def normalize_train_test_images(train_imgs, test_imgs, eps=1e-9):
-    ''' simple helper to take train and test images
-        and normalize the test images by the train mu/sigma '''
-    assert len(train_imgs.shape) == len(test_imgs.shape) >= 4
-
-    train_imgs , [mu, sigma] = normalize_images(train_imgs, eps=eps)
-    return [train_imgs,
-            (test_imgs - mu) / (sigma + eps)]
 
 
 def add_noise_to_imgs(imgs, disc_level=256.):
@@ -166,6 +119,7 @@ def is_cuda(tensor_or_var):
 
 def zeros_like(tensor):
     return torch.zeros_like(tensor)
+
 
 def ones(shape, cuda, dtype='float32'):
     shape = list(shape) if isinstance(shape, tuple) else shape
@@ -229,7 +183,7 @@ def merge_masks_into_imgs(imgs, masks_list):
 
         masks_gathered = torch.cat([masks_gathered, zeros, zeros], 2)
 
-    #print("masks gathered = ", masks_gathered.size())
+    # print("masks gathered = ", masks_gathered.size())
 
     # add C - channel
     imgs_gathered = expand_dims(imgs, 1) if len(imgs.size()) < 4 else imgs
@@ -295,6 +249,7 @@ def plot_tensor_grid(batch_tensor, save_filename=None):
 
 
 def plot_gaussian_tsne(z_mu_tensor, classes_tensor, prefix_name):
+    """Creates a TSNE plot given a [B, F] z_mu tensor, a list of corresponding classes and prefix for the file."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -321,7 +276,7 @@ def ewma(data, window):
     if not isinstance(data, np.ndarray):
         data = np.array(data)
 
-    alpha = 2 /(window + 1.0)
+    alpha = 2 / (window + 1.0)
     alpha_rev = 1-alpha
     n = data.shape[0]
 
@@ -336,7 +291,9 @@ def ewma(data, window):
     out = offset + cumsums*scale_arr[::-1]
     return out
 
+
 def zero_pad_smaller_cat(cat1, cat2):
+    """Given two categoricals zero pad the smaller one to make equivalent to the bigger one."""
     c1shp = cat1.size()
     c2shp = cat2.size()
     cuda = is_cuda(cat1)
@@ -417,6 +374,7 @@ def pad(tensor_or_var, num_pad, value=0, prepend=False, dim=-1):
 def int_type(use_cuda):
     return torch.cuda.IntTensor if use_cuda else torch.IntTensor
 
+
 def hash_to_size(text, size=-1):
     """ Get a hashed value for the provided text upto size
 
@@ -430,6 +388,7 @@ def hash_to_size(text, size=-1):
     hash_object = hashlib.sha1(str.encode(text))
     hex_dig = hash_object.hexdigest()
     return hex_dig[0:size]
+
 
 def get_aws_instance_id(timeout=2):
     """ Returns the AWS instance id or None
@@ -448,6 +407,25 @@ def get_aws_instance_id(timeout=2):
 
     return hash_to_size(r.text, 4)
 
+
+def get_ip_address_and_hostname(hostname=None):
+    """Simple helper to get the ip address and hostname.
+
+    :param hostname: None here grabs the local machine hostname
+    :returns: ip address, hostname
+    :rtype: str, str
+
+    """
+    hostname = socket.gethostname() if hostname is None else hostname
+    ip_addr = socket.gethostbyname(hostname)
+    return ip_addr, hostname
+
+
+def get_slurm_id():
+    """Simple helper to get the slurm job id."""
+    return os.environ.get('SLURM_JOBID', None)
+
+
 def long_type(use_cuda):
     return torch.cuda.LongTensor if use_cuda else torch.LongTensor
 
@@ -455,11 +433,13 @@ def long_type(use_cuda):
 def oneplus(x):
     return F.softplus(x, beta=1)
 
+
 def number_of_parameters(model, only_required_grad=False):
     if only_required_grad:
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
 
 def add_weight_norm(module):
     params = [p[0] for p in module.named_parameters()]
@@ -522,8 +502,8 @@ def network_to_half(network):
 
 
 def nan_check_and_break(tensor, name=""):
-        if nan_check(tensor, name) is True:
-            exit(-1)
+    if nan_check(tensor, name) is True:
+        exit(-1)
 
 
 def nan_check(tensor, name=""):
@@ -590,8 +570,10 @@ def get_name(args):
     vargs = deepcopy(vars(args))
     blacklist_keys = ['visdom_url', 'visdom_port', 'data_dir', 'download', 'cuda', 'uid',
                       'debug_step', 'detect_anomalies', 'model_dir', 'calculate_fid_with',
-                      'input_shape', 'fid_model_dir', 'output_dir']
-    filtered = {k:v for k,v in vargs.items() if k not in blacklist_keys} # remove useless info
+                      'input_shape', 'fid_model_dir', 'output_dir', 'gpu',
+                      'num_train_samples', 'num_test_samples', 'num_valid_samples', 'workers_per_replica',
+                      'steps_per_epoch', 'total_steps', 'distributed_master', 'distributed_port']
+    filtered = {k: v for k, v in vargs.items() if k not in blacklist_keys}  # remove useless info
 
     def _factor(name):
         ''' returns first characters of strings with _ separations'''
@@ -624,14 +606,17 @@ def get_name(args):
     bool2int = lambda v: int(v) if isinstance(v, bool) else v
     none2bool = lambda v: 0 if v is None else v
     nonestr2bool = lambda v: 0 if isinstance(v, str) and v.lower().strip() == 'none' else v
-    # clip2int = lambda v: int(v) if isinstance(v, (float, np.float32, np.float64)) and v == 0.0 else v
     clip2int = lambda v: int(v) if isinstance(v, float) and v - int(v) == 0 else v
-    filtered = {_factor(k):clip2int(nonestr2bool(none2bool(bool2int(v)))) for k,v in filtered.items()}
+    filtered = {_factor(k): clip2int(nonestr2bool(none2bool(bool2int(v)))) for k, v in filtered.items()}
+    filtered = {k: v for k, v in filtered.items() if v != 0}  # Removed 0-valued entries to save space
+
     name = _clean_task_str("{}_{}".format(
         args.uid if args.uid else "",
         "_".join(["{}{}".format(k, v) for k, v in filtered.items()])
-    ).replace('batchnorm', 'bn').replace('batch_groupnorm', 'bgn')
-                           .replace('groupnorm', 'gn')
+    ).replace('groupnorm', 'gn')
+                           .replace('sync_batchnorm', 'sbn')
+                           .replace('batchnorm', 'bn')
+                           .replace('batch_groupnorm', 'bgn')
                            .replace('instancenorm', 'in')
                            .replace('weightnorm', 'wn')
                            .replace('pixel_wise', 'pw')
@@ -642,9 +627,10 @@ def get_name(args):
                            .replace('disc_mix_logistic', 'dml')
                            .replace('log_logistic_256', 'll256')
                            .replace('pixelcnn', 'pcnn')
-                           .replace('isotropic_gaussian', 'ig')
-                           .replace('bernoulli', 'bern')
-                           .replace('mixture', 'mix')
+                           .replace('isotropic_gaussian', 'N')
+                           .replace('bernoulli', 'B')
+                           .replace('discrete', 'D')
+                           .replace('mixture', 'M')
                            .replace('parallel', 'par')
                            .replace('coordconv', 'cc')
                            .replace('dense', 'd')
@@ -663,6 +649,18 @@ def get_name(args):
                            .replace('uniform', 'u')
                            .replace('additive_vrnn', 'avrnn')
                            .replace('orthogonal', 'o')
+                           .replace('gaussian', 'N')
+                           .replace('cosine', 'cos')
+                           .replace('lars_', 'l')
+                           .replace('momentum', 'mom')
+                           .replace('autoencoder', 'ae')
+                           .replace('nih_chest_xray', 'xray')
+                           .replace('multi_image_folder', 'mimfolder')
+                           .replace('crop_dual_imagefolder', 'cdimfolder')
+                           .replace('image_folder', 'imfolder')
+                           .replace('celeba_sequential', 'sceleba')
+                           .replace('starcraft_predict_battle', 'sc2')
+                           .replace('svhn_centered', 'svhn')
     )
 
     # sanity check to ensure filename is 255 chars or less for being able to write to filesystem
@@ -672,9 +670,7 @@ def get_name(args):
 
 def register_nan_checks(model):
     def check_grad(module, grad_input, grad_output):
-        # print(module) you can add this to see that the hook is called
-        #print(module)
-        if  any(np.all(np.isnan(gi.data.cpu().numpy())) for gi in grad_input if gi is not None):
+        if any(np.all(np.isnan(gi.data.cpu().numpy())) for gi in grad_input if gi is not None):
             print('NaN gradient in ' + type(module).__name__)
             exit(-1)
 
