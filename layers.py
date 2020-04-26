@@ -715,7 +715,7 @@ class ModelSaver(object):
         self.best_loss = -np.inf if larger_is_better else np.inf
         self.larger_is_better = larger_is_better
         self.saver = EarlyStopping(**kwargs) if early_stop else BestModelSaver(**kwargs)
-        print("ModelSaver: {}".format(self.saver))
+        print("\nModelSaver: {}\n".format(self.saver))
 
     def save(self, **kwargs):
         kwargs.setdefault('epoch', self.epoch)
@@ -768,6 +768,9 @@ class ModelSaver(object):
 
 
 class BestModelSaver(object):
+    def __repr__(self):
+        return 'BestSaver()'
+
     def __init__(self, **kwargs):
         pass
 
@@ -784,6 +787,9 @@ class BestModelSaver(object):
 
 
 class EarlyStopping(object):
+    def __repr__(self):
+        return 'EarlyStopping(max_early_stop_steps={})'.format(self.max_steps)
+
     def __init__(self, max_early_stop_steps=10, **kwargs):
         """ Returns True when loss doesn't change for max_early_stop_steps
 
@@ -964,13 +970,13 @@ class Annealer(nn.Module):
 
 
 class LinearWarmupWithCosineAnnealing(nn.Module):
-    def __init__(self, decay_steps, warmup_steps, total_steps, alpha=0.0, constant_for_last_k_steps=0):
-        """Linear from [0.0, value_to_scale] followed by cosine decay of [value_to_scale, 0.0] over decay_steps.
+    def __init__(self, decay_steps, warmup_steps, total_steps, min_value=0.0, constant_for_last_k_steps=0):
+        """Linear from [0.0, value_to_scale] followed by cosine decay of [value_to_scale, min_value] over decay_steps.
 
         :param decay_steps: period over which to decay the cosine wave.
         :param warmup_steps: number of steps to linearly increase between.
         :param total_steps: total steps for model training.
-        :param alpha: minimum value as a fraction of value_to_scale
+        :param min_value: minimum value as a fraction of value_to_scale
         :param constant_for_last_k_steps: number of steps at the end to stay constant.
         :returns: scaled value_to_scale
         :rtype: float32
@@ -979,7 +985,7 @@ class LinearWarmupWithCosineAnnealing(nn.Module):
         super(LinearWarmupWithCosineAnnealing, self).__init__()
         self.decay_steps = decay_steps
         self.warmup_steps = warmup_steps
-        self.alpha = alpha
+        self.min_value = min_value
         self.is_warming_up = False
 
         # Used for constant at end logic
@@ -988,16 +994,22 @@ class LinearWarmupWithCosineAnnealing(nn.Module):
         self.step = 0
 
         # Pre-compute both the linear warmup and cosine annealing
-        self.linear_rate = [i / warmup_steps for i in range(warmup_steps)]
+        self.linear_rate = [max(i / warmup_steps, min_value) for i in range(warmup_steps)]
         self.cosine_rate = [self._cosine_anneal(1.0, i) for i in range(decay_steps)]
         self.lin_idx = 0
         self.cos_idx = 0
+
+    def extra_repr(self):
+        """Adds to __repr__ via nn.Module to print some more useful stuff."""
+        return 'total_steps={}, decay_steps={}, warmup_steps={}, min_value={}, constant_for_last_k_steps={}'.format(
+            self.total_steps, self.decay_steps, self.warmup_steps, self.min_value, self.constant_for_last_k_steps
+        )
 
     def _cosine_anneal(self, value_to_scale, step):
         """Runs cosine annealing given the """
         step = np.minimum(step, self.decay_steps)
         cosine_decay = 0.5 * (1 + np.cos(np.pi * step / self.decay_steps))
-        decay = (1 - self.alpha) * cosine_decay + self.alpha
+        decay = (1 - self.min_value) * cosine_decay + self.min_value
         return decay
 
     def _linear_warmup(self, step):
@@ -1038,6 +1050,7 @@ class LinearWarmupWithCosineAnnealing(nn.Module):
 class LinearWarmupWithFixedInterval(nn.Module):
     def __init__(self, fixed_steps, warmup_steps):
         """Linear from [0.0, value_to_scale] followed by a fixed rate of value_to_scale over fixed_steps.
+           Then repeat the same process; produces multiple cycles.
 
         :param fixed_steps: period over which to keep the fixed value for.
         :param warmup_steps: number of steps to linearly increase between.
@@ -1049,12 +1062,17 @@ class LinearWarmupWithFixedInterval(nn.Module):
         self.fixed_steps = fixed_steps
         self.warmup_steps = warmup_steps
         self.is_warming_up = True
-        self.step = 0
 
         # Pre-compute both the linear warmup and fixed rate
         self.linear_rate = [i / warmup_steps for i in range(warmup_steps)]
         self.lin_idx = 0
         self.fixed_idx = 0
+
+    def extra_repr(self):
+        """Adds to __repr__ via nn.Module to print some more useful stuff."""
+        return 'fixed_steps={}, warmup_steps={}'.format(
+            self.fixed_steps, self.warmup_steps
+        )
 
     def _linear_warmup(self, step):
         """Simple linear warmup given a step"""
