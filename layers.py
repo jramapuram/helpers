@@ -694,24 +694,28 @@ def init_state(n_layers, batch_size, hidden_size, rnn_type='lstm',
 
 
 class ModelSaver(object):
-    def __init__(self, args, model, burn_in_interval=20, larger_is_better=False, **kwargs):
-        """ Creates earlystopping or simple best-model storer.
+    def __init__(self, model, early_stop=False, burn_in_interval=20,
+                 larger_is_better=False, gpu=0, **kwargs):
+        """Creates earlystopping or simple best-model storer.
+           kwargs contains extra info for EarlyStopping model.
 
-        :param args: argparse object
         :param model: nn.Module with save and load fns
+        :param early_stop: uses early stopping instead of best-model saver.
         :param burn_in_interval: dont save for at least this many epochs.
         :param larger_is_better: are we maximizing or minimizing?
+        :param gpu: gpu device; used in DDP setting to save only from device-0
         :returns: ModelSaver Object
         :rtype: object
 
         """
-        self.gpu = args.gpu
+        self.gpu = gpu
         self.epoch = 1
         self.model = model
         self.burn_in_interval = burn_in_interval
         self.best_loss = -np.inf if larger_is_better else np.inf
         self.larger_is_better = larger_is_better
-        self.saver = EarlyStopping(**kwargs) if args.early_stop else BestModelSaver(**kwargs)
+        self.saver = EarlyStopping(**kwargs) if early_stop else BestModelSaver(**kwargs)
+        print("ModelSaver: {}".format(self.saver))
 
     def save(self, **kwargs):
         kwargs.setdefault('epoch', self.epoch)
