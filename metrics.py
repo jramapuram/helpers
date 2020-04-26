@@ -12,6 +12,25 @@ from .utils import to_data, float_type, int_type, \
 from .msssim import MultiScaleSSIM
 
 
+def topk(output, target, topk=(1,)):
+    """Computes the accuracy over the k top predictions for the specified values of k.
+       From: https://bit.ly/2Y1MOAq
+    """
+    with torch.no_grad():
+        maxk = max(topk)
+        batch_size = target.size(0)
+
+        _, pred = output.topk(maxk, 1, True, True)
+        pred = pred.t()
+        correct = pred.eq(target.view(1, -1).expand_as(pred))
+
+        res = []
+        for k in topk:
+            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+            res.append(correct_k.mul_(100.0 / batch_size))
+        return res
+
+
 def softmax_correct(preds, targets, dim=-1):
     preds_max = to_data(preds).max(dim=dim)[1]  # get the index of the max log-probability
     assert targets.shape == preds_max.shape, \
