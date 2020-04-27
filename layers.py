@@ -695,7 +695,7 @@ def init_state(n_layers, batch_size, hidden_size, rnn_type='lstm',
 
 class ModelSaver(object):
     def __init__(self, model, early_stop=False, burn_in_interval=20,
-                 larger_is_better=False, gpu=0, **kwargs):
+                 larger_is_better=False, rank=0, **kwargs):
         """Creates earlystopping or simple best-model storer.
            kwargs contains extra info for EarlyStopping model.
 
@@ -703,12 +703,12 @@ class ModelSaver(object):
         :param early_stop: uses early stopping instead of best-model saver.
         :param burn_in_interval: dont save for at least this many epochs.
         :param larger_is_better: are we maximizing or minimizing?
-        :param gpu: gpu device; used in DDP setting to save only from device-0
+        :param rank: rank in a DDP setting or 0.
         :returns: ModelSaver Object
         :rtype: object
 
         """
-        self.gpu = gpu
+        self.rank = rank
         self.epoch = 1
         self.model = model
         self.burn_in_interval = burn_in_interval
@@ -719,7 +719,7 @@ class ModelSaver(object):
 
     def save(self, **kwargs):
         kwargs.setdefault('epoch', self.epoch)
-        if self.gpu == 0:
+        if self.rank == 0:  # Only save on first DDP rank node.
             self.model.save(**kwargs)
 
     def restore(self):
@@ -2874,11 +2874,8 @@ def append_save_and_load_fns(model, optimizer, scheduler, grapher, args):
         if os.path.isdir(args.model_dir):
             model_filename = os.path.join(args.model_dir, prefix + get_name(args) + ".th")
             if os.path.isfile(model_filename):
-                # set the map location to the current gpu (in a distributed setting).
-                map_location = None
-                if args.gpu is not None and args.cuda:
-                    map_location = 'cuda:{}'.format(args.gpu)
-
+                # set the map location to the gpu0 or None ; devices are set via CUDA_VISIBLE_DEVICES.
+                map_location = 'cuda:0' if args.cuda else None
                 print("loading existing model: {} to map-loc {}".format(model_filename, map_location))
 
                 # load the full dictionary and set the model and optimizer params

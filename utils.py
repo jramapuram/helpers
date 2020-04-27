@@ -581,7 +581,8 @@ def get_name(args):
                       'debug_step', 'detect_anomalies', 'model_dir', 'calculate_fid_with',
                       'input_shape', 'fid_model_dir', 'output_dir', 'gpu',
                       'num_train_samples', 'num_test_samples', 'num_valid_samples', 'workers_per_replica',
-                      'steps_per_train_epoch', 'total_train_steps', 'distributed_master', 'distributed_port']
+                      'steps_per_train_epoch', 'total_train_steps', 'distributed_master', 'distributed_port',
+                      'distributed_rank']
     filtered = {k: v for k, v in vargs.items() if k not in blacklist_keys}  # remove useless info
 
     def _factor(name):
