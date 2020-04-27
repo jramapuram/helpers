@@ -408,6 +408,15 @@ def get_aws_instance_id(timeout=2):
     return hash_to_size(r.text, 4)
 
 
+def number_of_gpus():
+    """Returns an int describing availabe GPU devices respecting env vars."""
+    env_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
+    if env_devices is not None:
+        return 1 if ',' not in env_devices else len(env_devices.split(','))
+
+    return torch.cuda.device_count()
+
+
 def get_ip_address_and_hostname(hostname=None):
     """Simple helper to get the ip address and hostname.
 
