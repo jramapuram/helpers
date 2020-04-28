@@ -1,9 +1,7 @@
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torch.distributions as D
 
-from scipy import linalg
 from torchvision import transforms
 from torch.autograd import Variable
 
