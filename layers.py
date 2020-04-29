@@ -2927,10 +2927,11 @@ def append_save_and_load_fns(model, optimizer, scheduler, grapher, args):
 
             # HAX: write the scalars to a temp file and re-read them
             scalar_dict, window_dict = {}, {}
-            with tempfile.NamedTemporaryFile() as scalar, tempfile.NamedTemporaryFile() as window:
-                grapher.pickle_data(scalar.name, window.name)
-                scalar_dict = pickle.load(scalar.file)
-                window_dict = pickle.load(window.file)
+            if grapher is not None:
+                with tempfile.NamedTemporaryFile() as scalar, tempfile.NamedTemporaryFile() as window:
+                    grapher.pickle_data(scalar.name, window.name)
+                    scalar_dict = pickle.load(scalar.file)
+                    window_dict = pickle.load(window.file)
 
             # save the entire state
             torch.save(
@@ -2944,6 +2945,7 @@ def append_save_and_load_fns(model, optimizer, scheduler, grapher, args):
                 model_filename
             )
 
+    grapher = None if args.visdom_url is None else grapher  # nothing to save for tensorboard.
     model.load = functools.partial(load, model=model, grapher=grapher, optimizer=optimizer, scheduler=scheduler)
     model.save = functools.partial(save, model=model, grapher=grapher, optimizer=optimizer, scheduler=scheduler)
     return model

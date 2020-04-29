@@ -4,11 +4,8 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 import gc
-import logging
 import six
-import time
 
-from functools import wraps
 from tensorboardX.writer import SummaryWriter
 from .visdom_writer import VisdomWriter
 
