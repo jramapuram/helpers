@@ -323,7 +323,7 @@ def to_data(tensor_or_var):
 
 
 def eps(half=False):
-    return 1e-2 if half else 1e-6
+    return 1e-3 if half else 1e-6
 
 
 def get_dtype(tensor):
@@ -582,7 +582,7 @@ def get_name(args):
                       'input_shape', 'fid_model_dir', 'output_dir', 'gpu',
                       'num_train_samples', 'num_test_samples', 'num_valid_samples', 'workers_per_replica',
                       'steps_per_train_epoch', 'total_train_steps', 'distributed_master', 'distributed_port',
-                      'distributed_rank']
+                      'distributed_rank', 'multi_gpu_distributed']
     filtered = {k: v for k, v in vargs.items() if k not in blacklist_keys}  # remove useless info
 
     def _factor(name):
