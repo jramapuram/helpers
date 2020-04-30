@@ -2431,7 +2431,7 @@ def get_conv_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
                      norm_first_layer: bool = False,
                      norm_last_layer: bool = False,
                      activation: str = 'relu',
-                     pretrained: bool = False,
+                     pretrained: bool = True,
                      name: str = 'encoder',
                      **unused_kwargs):
     '''Helper to return the correct encoder function.'''
@@ -2452,6 +2452,18 @@ def get_conv_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
     # Mega-dict that curried the appropriate encoder.
     # The returned encoder still needs the CTOR, eg: enc(input_shape)
     net_map = {
+        'resnext50_32x4d': {
+            False: functools.partial(TorchvisionEncoder,
+                                     pretrained_output_size=2048,  # rx50-x4 avg-pool size
+                                     latent_size=latent_size,
+                                     activation_str=activation,
+                                     normalization_str=conv_normalization,
+                                     norm_first_layer=norm_first_layer,
+                                     norm_last_layer=norm_last_layer,
+                                     pretrained=pretrained,
+                                     freeze_base=False,  # TODO(jramapuram): parameterize
+                                     layer_fn=models.resnext50_32x4d),
+        },
         'resnet50': {
             False: functools.partial(TorchvisionEncoder,
                                      pretrained_output_size=2048,  # r50 avg-pool size
@@ -2463,6 +2475,66 @@ def get_conv_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
                                      pretrained=pretrained,
                                      freeze_base=False,  # TODO(jramapuram): parameterize
                                      layer_fn=models.resnet50),
+        },
+        'resnet34': {
+            False: functools.partial(TorchvisionEncoder,
+                                     pretrained_output_size=512,  # r34 avg-pool size
+                                     latent_size=latent_size,
+                                     activation_str=activation,
+                                     normalization_str=conv_normalization,
+                                     norm_first_layer=norm_first_layer,
+                                     norm_last_layer=norm_last_layer,
+                                     pretrained=pretrained,
+                                     freeze_base=False,  # TODO(jramapuram): parameterize
+                                     layer_fn=models.resnet34),
+        },
+        'resnet18': {
+            False: functools.partial(TorchvisionEncoder,
+                                     pretrained_output_size=512,  # r18 avg-pool size
+                                     latent_size=latent_size,
+                                     activation_str=activation,
+                                     normalization_str=conv_normalization,
+                                     norm_first_layer=norm_first_layer,
+                                     norm_last_layer=norm_last_layer,
+                                     pretrained=pretrained,
+                                     freeze_base=False,  # TODO(jramapuram): parameterize
+                                     layer_fn=models.resnet18),
+        },
+        'shufflenet_v2_x0_5': {
+            False: functools.partial(TorchvisionEncoder,
+                                     pretrained_output_size=1024,  # r34 avg-pool size
+                                     latent_size=latent_size,
+                                     activation_str=activation,
+                                     normalization_str=conv_normalization,
+                                     norm_first_layer=norm_first_layer,
+                                     norm_last_layer=norm_last_layer,
+                                     pretrained=pretrained,
+                                     freeze_base=False,  # TODO(jramapuram): parameterize
+                                     layer_fn=models.shufflenet_v2_x0_5),
+        },
+        'mobilenet_v2': {
+            False: functools.partial(TorchvisionEncoder,
+                                     pretrained_output_size=1280,  # mobilenet_v2 pool size
+                                     latent_size=latent_size,
+                                     activation_str=activation,
+                                     normalization_str=conv_normalization,
+                                     norm_first_layer=norm_first_layer,
+                                     norm_last_layer=norm_last_layer,
+                                     pretrained=pretrained,
+                                     freeze_base=False,  # TODO(jramapuram): parameterize
+                                     layer_fn=models.mobilenet_v2),
+        },
+        'densenet121': {
+            False: functools.partial(TorchvisionEncoder,
+                                     pretrained_output_size=1024,  # densenet pool size
+                                     latent_size=latent_size,
+                                     activation_str=activation,
+                                     normalization_str=conv_normalization,
+                                     norm_first_layer=norm_first_layer,
+                                     norm_last_layer=norm_last_layer,
+                                     pretrained=pretrained,
+                                     freeze_base=False,  # TODO(jramapuram): parameterize
+                                     layer_fn=models.densenet121),
         },
         'resnet': {
             # True for gated, False for non-gated
