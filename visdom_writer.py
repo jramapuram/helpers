@@ -2,9 +2,6 @@ import gc
 import pickle
 import os
 import numpy as np
-import math
-import json
-import time
 
 from tensorboardX.summary import compute_curve
 from tensorboardX.utils import figure_to_image
@@ -126,11 +123,9 @@ class VisdomWriter:
         """
         with open(scalar_path, "wb") as f:
             pickle.dump(self.scalar_dict, f)
-            #json.dump(self.scalar_dict, f)
 
         with open(window_path, "wb") as f:
             pickle.dump(self.windows, f)
-            #json.dump(self.scalar_dict, f)
 
     def add_histogram(self, tag, values, global_step=None, bins='tensorflow'):
         """Add histogram to summary.
@@ -146,7 +141,6 @@ class VisdomWriter:
         self.vis.histogram(make_np(values), opts={'title': tag})
         self.save()
 
-
     def add_heatmap(self, tag, values, global_step=None):
         """Add histogram to summary.
 
@@ -160,7 +154,6 @@ class VisdomWriter:
         values = make_np(values)
         self.vis.heatmap(make_np(values), opts={'title': tag})
         self.save()
-
 
     def add_image(self, tag, img_tensor, global_step=None, caption=None):
         """Add image data to summary.
@@ -177,8 +170,9 @@ class VisdomWriter:
         """
         fn = self.vis.images if len(img_tensor.shape) > 3 else self.vis.image
         img_tensor = make_np(img_tensor)
+        store_history = 'reconstruction' in tag or 'generated' in tag if tag is not None else False
         fn(img_tensor, win=tag,
-           opts={'title': tag, 'caption': caption })
+           opts={'title': tag, 'caption': caption, 'store_history': store_history})
         self.save()
 
     def add_figure(self, tag, figure, global_step=None, close=True):
