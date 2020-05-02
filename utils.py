@@ -575,7 +575,6 @@ def get_name(args):
     :rtype: str
 
     """
-
     vargs = deepcopy(vars(args))
     blacklist_keys = ['visdom_url', 'visdom_port', 'data_dir', 'download', 'cuda', 'uid',
                       'debug_step', 'detect_anomalies', 'model_dir', 'calculate_fid_with',
@@ -665,8 +664,11 @@ def get_name(args):
                            .replace('momentum', 'mom')
                            .replace('autoencoder', 'ae')
                            .replace('nih_chest_xray', 'xray')
-                           .replace('multi_image_folder', 'mimfolder')
+                           .replace('dali_image_folder', 'dimfolder')
+                           .replace('dali_multi_augment_image_folder', 'dmaimfolder')
                            .replace('crop_dual_imagefolder', 'cdimfolder')
+                           .replace('multi_image_folder', 'mimfolder')
+                           .replace('multi_augment_image_folder', 'maimfolder')
                            .replace('image_folder', 'imfolder')
                            .replace('celeba_sequential', 'sceleba')
                            .replace('starcraft_predict_battle', 'sc2')
