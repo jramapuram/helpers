@@ -36,9 +36,10 @@ class Grapher:
     def __getattr__(self, attr):
         for _, subscriber in six.iteritems(self.subscribers):
             def wrapper(*args, **kwargs):
-                for _, subscriber in six.iteritems(self.subscribers):
+                for subscriber_name, subscriber in six.iteritems(self.subscribers):
                     if hasattr(subscriber, attr):
-                        if attr != 'pickle_data':  # don't use async for pickling
+                        # Don't use async for pickling or if we are using tensorboard
+                        if attr != 'pickle_data' and 'tensorboard' not in subscriber_name:
                             fn = getattr(subscriber, attr)
                             asyncio.get_event_loop().run_in_executor(None, fn, *args, *kwargs)
                         else:
