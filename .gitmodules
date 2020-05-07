@@ -1,3 +1,0 @@
-[submodule "async_fid"]
-	path = async_fid
-	url = git+ssh://git@github.com/jramapuram/async_fid.git

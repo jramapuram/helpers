@@ -38,9 +38,11 @@ class Grapher:
             def wrapper(*args, **kwargs):
                 for _, subscriber in six.iteritems(self.subscribers):
                     if hasattr(subscriber, attr):
-                        # getattr(subscriber, attr)(*args, **kwargs)
-                        fn = getattr(subscriber, attr)
-                        asyncio.get_event_loop().run_in_executor(None, fn, *args, *kwargs)
+                        if attr != 'pickle_data':  # don't use async for pickling
+                            fn = getattr(subscriber, attr)
+                            asyncio.get_event_loop().run_in_executor(None, fn, *args, *kwargs)
+                        else:
+                            getattr(subscriber, attr)(*args, **kwargs)
 
             return wrapper
         raise AttributeError
