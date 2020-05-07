@@ -5,6 +5,7 @@ from __future__ import unicode_literals
 
 import gc
 import six
+import asyncio
 
 from tensorboardX.writer import SummaryWriter
 from .visdom_writer import VisdomWriter
@@ -37,7 +38,10 @@ class Grapher:
             def wrapper(*args, **kwargs):
                 for _, subscriber in six.iteritems(self.subscribers):
                     if hasattr(subscriber, attr):
-                        getattr(subscriber, attr)(*args, **kwargs)
+                        # getattr(subscriber, attr)(*args, **kwargs)
+                        fn = getattr(subscriber, attr)
+                        asyncio.get_event_loop().run_in_executor(None, fn, *args, *kwargs)
+
             return wrapper
         raise AttributeError
 

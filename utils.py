@@ -623,6 +623,7 @@ def get_name(args):
         args.uid if args.uid else "",
         "_".join(["{}{}".format(k, v) for k, v in filtered.items()])
     ).replace('groupnorm', 'gn')
+                           .replace('class_conditioned', 'ccvae')
                            .replace('sync_batchnorm', 'sbn')
                            .replace('batchnorm', 'bn')
                            .replace('batch_groupnorm', 'bgn')

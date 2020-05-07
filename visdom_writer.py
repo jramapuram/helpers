@@ -262,7 +262,8 @@ class VisdomWriter:
             self.vis.text(text_string, append=append)
         else:
             self.vis.text(text_string, win=tag, append=append)
-        # self.save(), MEH: don't save env just because of text
+
+        self.save()
 
     def add_graph_onnx(self, prototxt):
         # TODO: Visdom doesn't support graph visualization yet, so this is a no-op
