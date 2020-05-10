@@ -39,7 +39,8 @@ class Grapher:
                 for subscriber_name, subscriber in six.iteritems(self.subscribers):
                     if hasattr(subscriber, attr):
                         # Don't use async for pickling or if we are using tensorboard
-                        if attr != 'pickle_data' and 'tensorboard' not in subscriber_name:
+                        non_async_fns = ['pickle_data', 'close', 'reconnect_and_replay_log', '__init__', '_connect']
+                        if attr not in non_async_fns and 'tensorboard' not in subscriber_name:
                             fn = getattr(subscriber, attr)
                             asyncio.get_event_loop().run_in_executor(None, fn, *args, *kwargs)
                         else:

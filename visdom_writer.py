@@ -10,23 +10,40 @@ from tensorboardX.x2num import make_np
 
 class VisdomWriter:
     def __init__(self, env, server, port=8097, log_folder=None, use_incoming_socket=False, raise_exceptions=False):
+        self.env = env
+        self.server = server
+        self.port = port
+        self.use_incoming_socket = use_incoming_socket
+        self.raise_exceptions = raise_exceptions
+
+        self.scalar_dict = {}
+        self.log_filename = os.path.join(log_folder, env + ".log") if log_folder is not None else None
+        if log_folder is not None and not os.path.isdir(log_folder):
+            os.makedirs(log_folder)
+
+        print('log_filename = ', self.log_filename)
+
+        self.vis = self._connect()
+        self.windows = {}
+
+    def _connect(self):
+        """Simple helper to connect to the visdom instance and return a Visdom object."""
         try:
             from visdom import Visdom
         except ImportError:
             raise ImportError("Visdom visualization requires installation of Visdom")
 
-        self.env = env
-        self.scalar_dict = {}
-        self.server_connected = False
-        log_filename = os.path.join(log_folder, env + ".log") if log_folder is not None else None
-        if log_folder is not None and not os.path.isdir(log_folder):
-            os.makedirs(log_folder)
+        return Visdom(server=self.server, port=self.port, env=self.env,
+                      log_to_filename=self.log_filename,
+                      use_incoming_socket=self.use_incoming_socket,
+                      raise_exceptions=self.raise_exceptions)
 
-        self.vis = Visdom(server=server, port=port, env=env,
-                          log_to_filename=log_filename,
-                          use_incoming_socket=use_incoming_socket,
-                          raise_exceptions=raise_exceptions)
-        self.windows = {}
+    def reconnect_and_replay_log(self):
+        """Creates a new visdom instance and replays the log-file if it exists."""
+        print("replaying existing log to server as fallback...")
+        if self.log_filename is not None:
+            vis = self._connect()
+            vis.replay_log(self.log_filename)
 
     def add_scalar(self, tag, scalar_value, global_step=None):
         """Add scalar data to Visdom. Plots the values in a plot titled
@@ -346,6 +363,9 @@ class VisdomWriter:
         self.vis.save([self.env])
 
     def close(self):
+        """Closes the connection, but replays the entire log first if it exists."""
+        self.reconnect_and_replay_log()
+
         if hasattr(self, 'vis'):
             del self.vis
 

@@ -576,7 +576,7 @@ def get_name(args):
 
     """
     vargs = deepcopy(vars(args))
-    blacklist_keys = ['visdom_url', 'visdom_port', 'data_dir', 'download', 'cuda', 'uid',
+    blacklist_keys = ['visdom_url', 'visdom_port', 'data_dir', 'log_dir', 'download', 'cuda', 'uid',
                       'debug_step', 'detect_anomalies', 'model_dir', 'calculate_fid_with',
                       'input_shape', 'fid_model_dir', 'output_dir', 'gpu',
                       'num_train_samples', 'num_test_samples', 'num_valid_samples', 'workers_per_replica',
