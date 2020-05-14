@@ -102,38 +102,80 @@ class DistributedDataParallelPassthrough(nn.parallel.DistributedDataParallel):
             return getattr(self.module, name)
 
 
-class EvoNormS0(nn.Module):
-    """Implementes Evolving Normalization-Activation Layers, Liu et. at 2020."""
+class EvoNorm2D(nn.Module):
+    """An Evonorm implementation cleaned up from https://bit.ly/2SVb8Az"""
 
-    def __init__(self, num_features, groups=32, eps=1e-5):
-        super(EvoNormS0, self).__init__()
-        assert num_features % groups == 0, "{} % {} != 0 ".format(num_features, groups)
+    def __init__(self, num_features, num_groups=32, version='S0',
+                 non_linear=True, affine=True, momentum=0.9, eps=1e-5):
+        super(EvoNorm2D, self).__init__()
+        self.non_linear = non_linear
+        self.version = version
+        self.momentum = momentum
+        self.groups = num_groups
         self.eps = eps
-        self.groups = groups
-        self.v = nn.Parameter(torch.ones(num_features), requires_grad=True)
-        self.gamma = nn.Parameter(torch.ones(num_features), requires_grad=True)
-        self.beta = nn.Parameter(torch.zeros(num_features), requires_grad=True)
+        if self.version not in ['B0', 'S0']:
+            raise ValueError("Invalid EvoNorm version")
+
+        self.insize = num_features
+        self.affine = affine
+
+        if self.affine:
+            self.gamma = nn.Parameter(torch.ones(1, self.insize, 1, 1))
+            self.beta = nn.Parameter(torch.zeros(1, self.insize, 1, 1))
+            if self.non_linear:
+                self.v = nn.Parameter(torch.ones(1, self.insize, 1, 1))
+        else:
+            self.register_parameter('gamma', None)
+            self.register_parameter('beta', None)
+            self.register_buffer('v', None)
+        self.register_buffer('running_var', torch.ones(1, self.insize, 1, 1))
+
+        self.reset_parameters()
 
     @staticmethod
-    def group_std(x, eps, groups):
-        """Calculates groupnorm std-dev."""
-        N, C, H, W = x.shape
-        orig_type = x.dtype
-        x = x.view([N, groups, C // groups, H, W])
-        var = torch.var(x.float(), [2, 3, 4], keepdim=True)
-        var = var.add_(eps).sqrt_().view(N, -1, 1, 1).type(orig_type)
-        # var = var.add_(eps).sqrt_().type(orig_type)
-        print("var = ", var.shape)
-        return var
+    def instance_std(x, eps=1e-5):
+        var = torch.var(x, dim=(2, 3), keepdim=True).expand_as(x)
+        if torch.isnan(var).any():
+            var = torch.zeros(var.shape)
+        return torch.sqrt(var + eps)
+
+    @staticmethod
+    def group_std(x, groups=32, eps=1e-5):
+        N, C, H, W = x.size()
+        x = torch.reshape(x, (N, groups, C // groups, H, W))
+        var = torch.var(x, dim=(2, 3, 4), keepdim=True).expand_as(x)
+        return torch.reshape(torch.sqrt(var + eps), (N, C, H, W))
+
+    def reset_parameters(self):
+        self.running_var.fill_(1)
+
+    def _check_input_dim(self, x):
+        if x.dim() != 4:
+            raise ValueError('expected 4D input (got {}D input)'
+                             .format(x.dim()))
 
     def forward(self, x):
-        if self.training:
-            num = x * torch.sigmoid(self.v.view(1, -1, 1, 1) * x)
-            print("num = ", num.shape)
-            return (num / self.group_std(x, self.eps, self.groups) * self.gamma.view(1, -1, 1, 1)
-                    + self.beta.view(1, -1, 1, 1))
+        self._check_input_dim(x)
+        if self.version == 'S0':
+            if self.non_linear:
+                num = x * torch.sigmoid(self.v * x)
+                return num / self.group_std(x, groups=self.groups, eps=self.eps) * self.gamma + self.beta
 
-        return x * self.gamma + self.beta
+            return x * self.gamma + self.beta
+
+        if self.version == 'B0':
+            if self.training:
+                var = torch.var(x, dim=(0, 2, 3), unbiased=False, keepdim=True)
+                self.running_var.mul_(self.momentum)
+                self.running_var.add_((1 - self.momentum) * var)
+            else:
+                var = self.running_var
+
+            if self.non_linear:
+                den = torch.max((var + self.eps).sqrt(), self.v * x + self.instance_std(x, eps=self.eps))
+                return x / den * self.gamma + self.beta
+
+            return x * self.gamma + self.beta
 
 
 class Upsample(nn.Module):
@@ -1205,11 +1247,11 @@ class AttentionBlock(nn.Module):
         return out.squeeze()
 
 
-class ResnetBlock(nn.Module):
+class BasicBlock(nn.Module):
     def __init__(self, in_channels, out_channels, layer_fn, resample=None,
                  normalization_str="batchnorm", init_norm=True,
                  activation_str="relu", **kwargs):
-        super(ResnetBlock, self).__init__()
+        super(BasicBlock, self).__init__()
         gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, out_channels)}
         norm_fn = functools.partial(
             add_normalization, normalization_str=normalization_str,
@@ -1223,7 +1265,7 @@ class ResnetBlock(nn.Module):
 
         self.conv1 = norm_fn(layer_fn(in_channels, out_channels))
         self.act = str_to_activ(activation_str)
-        self.conv2 = layer_fn(out_channels, out_channels)
+        self.conv2 = norm_fn(layer_fn(out_channels, out_channels))
 
         # Learnable skip-connection
         self.skip_connection = None
@@ -1241,6 +1283,52 @@ class ResnetBlock(nn.Module):
 
         out = self.act(self.conv1(x))
         out = self.conv2(out)
+
+        if self.skip_connection is not None:
+            x = self.skip_connection(x)
+
+        return out + x
+
+
+class BottleneckBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, layer_fn, resample=None,
+                 normalization_str="batchnorm", init_norm=True,
+                 activation_str="relu", **kwargs):
+        super(BottleneckBlock, self).__init__()
+        gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, out_channels)}
+        norm_fn = functools.partial(
+            add_normalization, normalization_str=normalization_str,
+            ndims=2, nfeatures=out_channels // 2, **gn_groups)
+
+        # The actual underlying model
+        self.resample = resample
+        self.init_norm = None
+        if normalization_str not in ['weightnorm', 'spectralnorm'] and init_norm:  # handle special case of weight hooks
+            self.init_norm = norm_fn(Identity(), nfeatures=in_channels)
+
+        self.conv1 = norm_fn(layer_fn(in_channels, out_channels // 2))
+        self.act = str_to_activ(activation_str)
+        self.conv2 = norm_fn(layer_fn(out_channels // 2, out_channels // 2))
+        self.conv3 = norm_fn(layer_fn(out_channels // 2, out_channels), nfeatures=out_channels)
+
+        # Learnable skip-connection
+        self.skip_connection = None
+        if in_channels != out_channels or resample is not None:
+            self.skip_connection = layer_fn(in_channels, out_channels, kernel_size=1, padding=0)
+
+    def forward(self, x):
+        out = x
+        if self.init_norm is not None:
+            out = self.act(self.init_norm(x))
+
+        if self.resample:
+            out = self.resample(out)
+            x = self.resample(x)
+
+        out = self.act(self.conv1(x))
+        out = self.conv2(out)
+        out = self.act(out)
+        out = self.conv3(out)
 
         if self.skip_connection is not None:
             x = self.skip_connection(x)
@@ -1368,6 +1456,12 @@ def add_normalization(module, normalization_str, ndims, nfeatures, **kwargs):
         'groupnorm': {
             2: lambda nfeatures, **kwargs: nn.GroupNorm(kwargs['num_groups'], nfeatures)
         },
+        'evonorms0': {
+            2: lambda nfeatures, **kwargs: EvoNorm2D(nfeatures, kwargs['num_groups']),
+        },
+        'evonormb0': {
+            2: lambda nfeatures, **kwargs: EvoNorm2D(nfeatures, kwargs['num_groups'], version='B0'),
+        },
         'batch_groupnorm': {
             2: lambda nfeatures, **kwargs: BatchGroupNorm(kwargs['num_groups'], nfeatures)
         },
@@ -1397,9 +1491,9 @@ def add_normalization(module, normalization_str, ndims, nfeatures, **kwargs):
         }
     }
 
-    if normalization_str == 'groupnorm':
-        assert 'num_groups' in kwargs, "need to specify groups for GN"
-        assert ndims > 1, "group norm needs channels to operate"
+    if normalization_str in ['groupnorm', 'evonorms0']:
+        assert 'num_groups' in kwargs, "need to specify groups for GN/EvoNormS0"
+        assert ndims > 1, "GN / evonorms0 needs channels to operate"
 
     if normalization_str == 'weightnorm' or normalization_str == 'spectralnorm':
         return norm_map[normalization_str][ndims](nfeatures, **kwargs)
@@ -1451,10 +1545,10 @@ def _build_resnet_stack(input_chans, output_chans,
         add_normalization, module=Identity(), normalization_str=normalization_str, ndims=2)
     layers = []
 
-    if norm_first_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
-        init_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, input_chans)}
-        layers.append(norm_fn(nfeatures=input_chans, **init_gn_groups))
-        # layers.append(activation_fn())  # TODO(jramapuram): consider this.
+    # if norm_first_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
+    #     init_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, input_chans)}
+    #     layers.append(norm_fn(nfeatures=input_chans, **init_gn_groups))
+    #     # layers.append(activation_fn())  # TODO(jramapuram): consider this.
 
     # build the channel map.
     channels = [input_chans, int(base_channels)]
@@ -1473,12 +1567,12 @@ def _build_resnet_stack(input_chans, output_chans,
         init_norm_i = norm_first_layer if idx == 0 else True
 
         # Construct the actual underlying layer
-        layer_i = ResnetBlock(chan_in, chan_out,
-                              resample=resample_fn_i,
-                              layer_fn=layer_fn_i,
-                              normalization_str=normalization_str,
-                              init_norm=init_norm_i,
-                              activation_str=activation_str)
+        layer_i = BasicBlock(chan_in, chan_out,
+                             resample=resample_fn_i,
+                             layer_fn=layer_fn_i,
+                             normalization_str=normalization_str,
+                             init_norm=init_norm_i,
+                             activation_str=activation_str)
         layers.append(layer_i)
 
         # Add attention block
@@ -1703,6 +1797,7 @@ class Resnet32Decoder(nn.Module):
                  norm_last_layer=False, layer_fn=nn.Conv2d):
         super(Resnet32Decoder, self).__init__()
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
+        self.act = str_to_activ_module(activation_str)
 
         # Handle pre-decoder and post-decoder normalization
         def build_norm_layer(use_norm, feature_size, ndims=1):
@@ -1741,6 +1836,7 @@ class Resnet32Decoder(nn.Module):
                                          norm_first_layer=False,  # Handled already
                                          norm_last_layer=True)    # We have a final conv
         self.final_conv = nn.Sequential(
+            self.act(),
             nn.Conv2d(output_chans, output_chans, kernel_size=1, stride=1),
             final_norm
         )
@@ -1768,6 +1864,7 @@ class Resnet64Decoder(nn.Module):
                  norm_last_layer=False, layer_fn=nn.Conv2d):
         super(Resnet64Decoder, self).__init__()
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
+        self.act = str_to_activ_module(activation_str)
 
         # Handle pre-decoder and post-decoder normalization
         def build_norm_layer(use_norm, feature_size, ndims=1):
@@ -1805,8 +1902,9 @@ class Resnet64Decoder(nn.Module):
                                          activation_str=activation_str,
                                          normalization_str=normalization_str,
                                          norm_first_layer=False,  # Handled already
-                                         norm_last_layer=norm_last_layer)
+                                         norm_last_layer=True)    # Final layer is below
         self.final_conv = nn.Sequential(
+            self.act(),
             nn.Conv2d(output_chans, output_chans, kernel_size=1, stride=1),
             final_norm
         )
@@ -1834,6 +1932,7 @@ class Resnet128Decoder(nn.Module):
                  norm_last_layer=False, layer_fn=nn.Conv2d):
         super(Resnet128Decoder, self).__init__()
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
+        self.act = str_to_activ_module(activation_str)
 
         # Handle pre-decoder and post-decoder normalization
         def build_norm_layer(use_norm, feature_size, ndims=1):
@@ -1870,8 +1969,9 @@ class Resnet128Decoder(nn.Module):
                                          activation_str=activation_str,
                                          normalization_str=normalization_str,
                                          norm_first_layer=False,  # Handled already
-                                         norm_last_layer=norm_last_layer)
+                                         norm_last_layer=True)    # Final conv below
         self.final_conv = nn.Sequential(
+            self.act(),
             nn.Conv2d(output_chans, output_chans, kernel_size=1, stride=1),
             final_norm
         )
@@ -2640,37 +2740,18 @@ def get_conv_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
     return fn
 
 
-def get_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W]
-                encoder_layer_type: str = 'conv',
-                encoder_base_channels: int = 32,  # For conv models
-                encoder_channel_multiplier: int = 2,
-                latent_size: int = 512,   # For dense models
-                num_layers: int = 3,      # For dense models
-                dense_normalization: str = 'none',
-                conv_normalization: str = 'none',
-                disable_gated: bool = True,
-                norm_first_layer: bool = False,
-                norm_last_layer: bool = False,
-                activation: str = 'relu',
-                pretrained: bool = False,
-                name: str = 'encoder',
-                **unused_kwargs):
-    '''Helper to return the correct encoder function.'''
-    if encoder_layer_type != 'dense':
-        return get_conv_encoder(input_shape=input_shape,
-                                encoder_layer_type=encoder_layer_type,
-                                encoder_base_channels=encoder_base_channels,
-                                encoder_channel_multiplier=encoder_channel_multiplier,
-                                latent_size=latent_size,
-                                dense_normalization=dense_normalization,
-                                conv_normalization=conv_normalization,
-                                disable_gated=disable_gated,
-                                norm_first_layer=norm_first_layer,
-                                norm_last_layer=norm_last_layer,
-                                activation=activation,
-                                pretrained=pretrained,
-                                name=name, **unused_kwargs)
-
+def get_dense_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W]
+                      encoder_layer_type: str = 'dense',
+                      latent_size: int = 512,   # For dense models
+                      num_layers: int = 3,      # For dense models
+                      dense_normalization: str = 'none',
+                      disable_gated: bool = True,
+                      norm_first_layer: bool = False,
+                      norm_last_layer: bool = False,
+                      activation: str = 'relu',
+                      pretrained: bool = False,
+                      name: str = 'encoder',
+                      **unused_kwargs):
     # Handle dense model building separately since there are no size restrictions.
     # The returned encoder still needs the CTOR, eg: enc(input_shape)
     net_map = {
@@ -2704,6 +2785,50 @@ def get_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W]
         name
     ))
     return fn
+
+
+def get_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W]
+                encoder_layer_type: str = 'conv',
+                encoder_base_channels: int = 32,  # For conv models
+                encoder_channel_multiplier: int = 2,
+                latent_size: int = 512,   # For dense models
+                num_layers: int = 3,      # For dense models
+                dense_normalization: str = 'none',
+                conv_normalization: str = 'none',
+                disable_gated: bool = True,
+                norm_first_layer: bool = False,
+                norm_last_layer: bool = False,
+                activation: str = 'relu',
+                pretrained: bool = False,
+                name: str = 'encoder',
+                **unused_kwargs):
+    '''Helper to return the correct encoder function.'''
+    if encoder_layer_type != 'dense':
+        return get_conv_encoder(input_shape=input_shape,
+                                encoder_layer_type=encoder_layer_type,
+                                encoder_base_channels=encoder_base_channels,
+                                encoder_channel_multiplier=encoder_channel_multiplier,
+                                latent_size=latent_size,
+                                dense_normalization=dense_normalization,
+                                conv_normalization=conv_normalization,
+                                disable_gated=disable_gated,
+                                norm_first_layer=norm_first_layer,
+                                norm_last_layer=norm_last_layer,
+                                activation=activation,
+                                pretrained=pretrained,
+                                name=name, **unused_kwargs)
+
+    return get_dense_encoder(input_shape=input_shape,
+                             encoder_layer_type=encoder_layer_type,
+                             latent_size=latent_size,
+                             num_layers=num_layers,
+                             dense_normalization=dense_normalization,
+                             disable_gated=disable_gated,
+                             norm_first_layer=norm_first_layer,
+                             norm_last_layer=norm_last_layer,
+                             activation=activation,
+                             pretrained=pretrained,
+                             name=name, **unused_kwargs)
 
 
 def get_conv_decoder(output_shape: Tuple[int, int, int],  # output image shape [B, H, W]

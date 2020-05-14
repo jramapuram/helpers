@@ -161,6 +161,13 @@ def scale(val, src, dst):
     return ((val - src[0]) / (src[1]-src[0])) * (dst[1]-dst[0]) + dst[0]
 
 
+def l2_normalize(x, dim=None, eps=1e-12):
+    """Normalize a tensor over dim using the L2-norm."""
+    sq_sum = torch.sum(torch.square(x), dim=dim, keepdim=True)
+    inv_norm = torch.rsqrt(torch.max(sq_sum, torch.ones_like(sq_sum)*eps))
+    return x * inv_norm
+
+
 def generate_random_categorical(num_targets, batch_size, use_cuda=False):
     ''' Helper to return a categorical of [batch_size, num_targets]
         where one of the num_targets are chosen at random[uniformly]'''

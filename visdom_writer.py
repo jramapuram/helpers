@@ -40,8 +40,8 @@ class VisdomWriter:
 
     def reconnect_and_replay_log(self):
         """Creates a new visdom instance and replays the log-file if it exists."""
-        print("replaying existing log to server as fallback...")
-        if self.log_filename is not None:
+        if self.log_filename is not None and os.path.isfile(self.log_filename):
+            print("replaying existing log to server as fallback...")
             vis = self._connect()
             vis.replay_log(self.log_filename)
 
