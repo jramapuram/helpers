@@ -938,7 +938,7 @@ def init_weights(module, init='orthogonal'):
 
 
 def _compute_group_norm_planes(normalization_str, planes):
-    """ Helper to compute group-norm planes
+    """ Intelligent helper to compute sane group-norm planes.
 
     :param normalization_str: the type of normalization
     :param planes: the output channels
@@ -946,14 +946,35 @@ def _compute_group_norm_planes(normalization_str, planes):
     :rtype: int
 
     """
-    if planes % 2 == 0 and normalization_str == 'groupnorm':
-        gn_planes = max(int(min(np.ceil(planes / 2), 32)), 1)
-    elif planes % 3 == 0 and normalization_str == 'groupnorm':
-        gn_planes = max(int(min(np.ceil(planes / 3), 32)), 1)
-    elif normalization_str != 'groupnorm':
-        gn_planes = 0
-    else:  # in the case where it's prime
-        gn_planes = planes
+    gn_planes = 0
+
+    def factors(n):
+        # find all factors of the number n; from https://bit.ly/36a087J
+        from functools import reduce
+        return set(reduce(list.__add__, ([i, n//i] for i in range(1, int(n**0.5) + 1) if n % i == 0)))
+
+    if normalization_str == 'groupnorm':
+        all_factors = factors(planes)
+
+        if 32 in all_factors and planes != 32:  # If we can divide by 32 (default value from paper) go for it
+            gn_planes = 32
+        else:
+            if planes % 2 == 0 and planes < 32:                # handles < 32 planes smartly
+                gn_planes = max(int(np.ceil(planes / 2)), 1)
+            elif planes % 3 == 0 and planes < 32:              # handles < 32 planes smartly
+                gn_planes = max(int(np.ceil(planes / 3)), 1)
+            else:
+                # Find the closest factor to 32 that can divide planes
+                # and return the value closest than 32 that can divide it.
+                all_factors.add(32)
+                all_factors = sorted(list(all_factors))
+                idx_of_32 = all_factors.index(32)
+                closest_smaller = all_factors[idx_of_32 - 1]
+                closest_bigger = all_factors[idx_of_32 + 1] if idx_of_32 + 1 > len(all_factors) else planes
+                if (32 - closest_smaller < closest_bigger - 32) or closest_bigger == planes:
+                    gn_planes = closest_smaller
+                else:
+                    gn_planes = closest_bigger
 
     return gn_planes
 
@@ -1252,20 +1273,21 @@ class BasicBlock(nn.Module):
                  normalization_str="batchnorm", init_norm=True,
                  activation_str="relu", **kwargs):
         super(BasicBlock, self).__init__()
-        gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, out_channels)}
+        gn_in_groups = {"num_groups": _compute_group_norm_planes(normalization_str, in_channels)}
+        gn_out_groups = {"num_groups": _compute_group_norm_planes(normalization_str, out_channels)}
         norm_fn = functools.partial(
             add_normalization, normalization_str=normalization_str,
-            ndims=2, nfeatures=out_channels, **gn_groups)
+            ndims=2, nfeatures=out_channels)
 
         # The actual underlying model
         self.resample = resample
         self.init_norm = None
         if normalization_str not in ['weightnorm', 'spectralnorm'] and init_norm:  # handle special case of weight hooks
-            self.init_norm = norm_fn(Identity(), nfeatures=in_channels)
+            self.init_norm = norm_fn(Identity(), nfeatures=in_channels, **gn_in_groups)
 
-        self.conv1 = norm_fn(layer_fn(in_channels, out_channels))
+        self.conv1 = norm_fn(layer_fn(in_channels, out_channels), **gn_out_groups)
         self.act = str_to_activ(activation_str)
-        self.conv2 = norm_fn(layer_fn(out_channels, out_channels))
+        self.conv2 = norm_fn(layer_fn(out_channels, out_channels), **gn_out_groups)
 
         # Learnable skip-connection
         self.skip_connection = None
@@ -1295,21 +1317,23 @@ class BottleneckBlock(nn.Module):
                  normalization_str="batchnorm", init_norm=True,
                  activation_str="relu", **kwargs):
         super(BottleneckBlock, self).__init__()
-        gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, out_channels)}
+        gn_in_groups = {"num_groups": _compute_group_norm_planes(normalization_str, in_channels)}
+        gn_half_groups = {"num_groups": _compute_group_norm_planes(normalization_str, out_channels // 2)}
+        gn_out_groups = {"num_groups": _compute_group_norm_planes(normalization_str, out_channels)}
         norm_fn = functools.partial(
             add_normalization, normalization_str=normalization_str,
-            ndims=2, nfeatures=out_channels // 2, **gn_groups)
+            ndims=2, nfeatures=out_channels // 2)
 
         # The actual underlying model
         self.resample = resample
         self.init_norm = None
         if normalization_str not in ['weightnorm', 'spectralnorm'] and init_norm:  # handle special case of weight hooks
-            self.init_norm = norm_fn(Identity(), nfeatures=in_channels)
+            self.init_norm = norm_fn(Identity(), nfeatures=in_channels, **gn_in_groups)
 
-        self.conv1 = norm_fn(layer_fn(in_channels, out_channels // 2))
+        self.conv1 = norm_fn(layer_fn(in_channels, out_channels // 2), **gn_half_groups)
         self.act = str_to_activ(activation_str)
-        self.conv2 = norm_fn(layer_fn(out_channels // 2, out_channels // 2))
-        self.conv3 = norm_fn(layer_fn(out_channels // 2, out_channels), nfeatures=out_channels)
+        self.conv2 = norm_fn(layer_fn(out_channels // 2, out_channels // 2), **gn_half_groups)
+        self.conv3 = norm_fn(layer_fn(out_channels // 2, out_channels), nfeatures=out_channels, **gn_out_groups)
 
         # Learnable skip-connection
         self.skip_connection = None
@@ -1493,7 +1517,7 @@ def add_normalization(module, normalization_str, ndims, nfeatures, **kwargs):
 
     if normalization_str in ['groupnorm', 'evonorms0']:
         assert 'num_groups' in kwargs, "need to specify groups for GN/EvoNormS0"
-        assert ndims > 1, "GN / evonorms0 needs channels to operate"
+        assert ndims == 2, "GN / EvoNormS0 only works over 2d tensors, got {}d".format(ndims)
 
     if normalization_str == 'weightnorm' or normalization_str == 'spectralnorm':
         return norm_map[normalization_str][ndims](nfeatures, **kwargs)
@@ -1793,51 +1817,53 @@ class VolumePreservingResnet(nn.Module):
 
 class Resnet32Decoder(nn.Module):
     def __init__(self, input_size, output_chans, base_channels=1024, channel_multiplier=0.5,
-                 activation_str="relu", normalization_str="none", norm_first_layer=True,
-                 norm_last_layer=False, layer_fn=nn.Conv2d):
+                 activation_str="relu", conv_normalization_str="none", dense_normalization_str="none",
+                 norm_first_layer=True, norm_last_layer=False, layer_fn=nn.Conv2d):
         super(Resnet32Decoder, self).__init__()
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
         self.act = str_to_activ_module(activation_str)
 
         # Handle pre-decoder and post-decoder normalization
-        def build_norm_layer(use_norm, feature_size, ndims=1):
+        def build_norm_layer(normalization_str, use_norm, feature_size, ndims=1):
             norm_layer = Identity()
-            if use_norm and normalization_str not in ['weightnorm', 'spectralnorm']:
+            if use_norm and normalization_str not in ['weightnorm', 'spectralnorm'] and normalization_str != 'none':
+                gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, feature_size)}
                 norm_layer = add_normalization(norm_layer, normalization_str,
-                                               ndims=ndims, nfeatures=feature_size)
+                                               ndims=ndims, nfeatures=feature_size, **gn_groups)
             return norm_layer
 
-        init_norm = build_norm_layer(norm_first_layer, input_size)
-        final_norm = build_norm_layer(norm_last_layer, output_chans, ndims=2)
+        init_norm = build_norm_layer(dense_normalization_str, norm_first_layer, input_size)
+        final_norm = build_norm_layer(conv_normalization_str, norm_last_layer, output_chans, ndims=2)
 
         # Project to 4x4 first
         self.mlp_proj = nn.Sequential(
             View([-1, input_size]),
             init_norm,
             add_normalization(nn.Linear(input_size, input_size*4*4),
-                              normalization_str, ndims=1, nfeatures=input_size*4*4),
+                              dense_normalization_str, ndims=1, nfeatures=input_size*4*4),
             str_to_activ_module(activation_str)(),
             View([-1, input_size, 4, 4]),
         )
 
         # The main model
+        final_resblock_chans = int(base_channels * (channel_multiplier ** 3))
         self.model = _build_resnet_stack(input_chans=input_size,
-                                         output_chans=output_chans,
+                                         output_chans=final_resblock_chans,
                                          layer_fn=layer_fn,
                                          base_channels=base_channels,
                                          channel_multiplier=channel_multiplier,
                                          kernels=[3, 3, 3],
                                          strides=[1, 1, 1],
                                          resample=[True, True, True],
-                                         attentions=[True, True, True],
+                                         attentions=[False, False, False],  # following BigGAN no attention on 32x32?
                                          resample_fn=functools.partial(F.interpolate, scale_factor=2),
                                          activation_str=activation_str,
-                                         normalization_str=normalization_str,
+                                         normalization_str=conv_normalization_str,
                                          norm_first_layer=False,  # Handled already
                                          norm_last_layer=True)    # We have a final conv
         self.final_conv = nn.Sequential(
             self.act(),
-            nn.Conv2d(output_chans, output_chans, kernel_size=1, stride=1),
+            nn.Conv2d(final_resblock_chans, output_chans, kernel_size=1, stride=1),
             final_norm
         )
 
@@ -1851,7 +1877,7 @@ class Resnet32Decoder(nn.Module):
         outputs = self.final_conv(outputs)
 
         if upsample_last:
-            return F.upsample(outputs, size=outputs.shape[-2:],
+            return F.upsample(outputs, size=(32, 32),
                               mode='bilinear',
                               align_corners=True)
 
@@ -1860,52 +1886,53 @@ class Resnet32Decoder(nn.Module):
 
 class Resnet64Decoder(nn.Module):
     def __init__(self, input_size, output_chans, base_channels=1024, channel_multiplier=0.5,
-                 activation_str="relu", normalization_str="none", norm_first_layer=True,
-                 norm_last_layer=False, layer_fn=nn.Conv2d):
+                 activation_str="relu", conv_normalization_str="none", dense_normalization_str="none",
+                 norm_first_layer=True, norm_last_layer=False, layer_fn=nn.Conv2d):
         super(Resnet64Decoder, self).__init__()
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
         self.act = str_to_activ_module(activation_str)
 
         # Handle pre-decoder and post-decoder normalization
-        def build_norm_layer(use_norm, feature_size, ndims=1):
+        def build_norm_layer(normalization_str, use_norm, feature_size, ndims=1):
             norm_layer = Identity()
             if use_norm and normalization_str not in ['weightnorm', 'spectralnorm']:
+                gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, feature_size)}
                 norm_layer = add_normalization(norm_layer, normalization_str,
-                                               ndims=ndims, nfeatures=feature_size)
+                                               ndims=ndims, nfeatures=feature_size, **gn_groups)
             return norm_layer
 
-        init_norm = build_norm_layer(norm_first_layer, input_size)
-        final_norm = build_norm_layer(norm_last_layer, output_chans, ndims=2)
+        init_norm = build_norm_layer(dense_normalization_str, norm_first_layer, input_size)
+        final_norm = build_norm_layer(conv_normalization_str, norm_last_layer, output_chans, ndims=2)
 
         # Project to 4x4 first
         self.mlp_proj = nn.Sequential(
             View([-1, input_size]),
             init_norm,
             add_normalization(nn.Linear(input_size, input_size*4*4),
-                              normalization_str, ndims=1, nfeatures=input_size*4*4),
+                              dense_normalization_str, ndims=1, nfeatures=input_size*4*4),
             str_to_activ_module(activation_str)(),
             View([-1, input_size, 4, 4]),
         )
 
         # The main model
+        final_resblock_chans = int(base_channels * (channel_multiplier ** 4))
         self.model = _build_resnet_stack(input_chans=input_size,
-                                         output_chans=output_chans,
+                                         output_chans=final_resblock_chans,
                                          layer_fn=layer_fn,
                                          base_channels=base_channels,
                                          channel_multiplier=channel_multiplier,
                                          kernels=[3, 3, 3, 3],
                                          strides=[1, 1, 1, 1],
                                          resample=[True, True, True, True],
-                                         # attentions=[False, False, False, False],
-                                         attentions=[True, True, True, True],
+                                         attentions=[False, False, False, True],
                                          resample_fn=functools.partial(F.interpolate, scale_factor=2),
                                          activation_str=activation_str,
-                                         normalization_str=normalization_str,
+                                         normalization_str=conv_normalization_str,
                                          norm_first_layer=False,  # Handled already
                                          norm_last_layer=True)    # Final layer is below
         self.final_conv = nn.Sequential(
             self.act(),
-            nn.Conv2d(output_chans, output_chans, kernel_size=1, stride=1),
+            nn.Conv2d(final_resblock_chans, output_chans, kernel_size=1, stride=1),
             final_norm
         )
 
@@ -1919,7 +1946,7 @@ class Resnet64Decoder(nn.Module):
         outputs = self.final_conv(outputs)
 
         if upsample_last:
-            return F.upsample(outputs, size=outputs.shape[-2:],
+            return F.upsample(outputs, size=(64, 64),
                               mode='bilinear',
                               align_corners=True)
 
@@ -1928,51 +1955,53 @@ class Resnet64Decoder(nn.Module):
 
 class Resnet128Decoder(nn.Module):
     def __init__(self, input_size, output_chans, base_channels=1024, channel_multiplier=0.5,
-                 activation_str="relu", normalization_str="none", norm_first_layer=True,
-                 norm_last_layer=False, layer_fn=nn.Conv2d):
+                 activation_str="relu", conv_normalization_str="none", dense_normalization_str="none",
+                 norm_first_layer=True, norm_last_layer=False, layer_fn=nn.Conv2d):
         super(Resnet128Decoder, self).__init__()
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
         self.act = str_to_activ_module(activation_str)
 
         # Handle pre-decoder and post-decoder normalization
-        def build_norm_layer(use_norm, feature_size, ndims=1):
+        def build_norm_layer(normalization_str, use_norm, feature_size, ndims=1):
             norm_layer = Identity()
             if use_norm and normalization_str not in ['weightnorm', 'spectralnorm']:
+                gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, feature_size)}
                 norm_layer = add_normalization(norm_layer, normalization_str,
-                                               ndims=ndims, nfeatures=feature_size)
+                                               ndims=ndims, nfeatures=feature_size, **gn_groups)
             return norm_layer
 
-        init_norm = build_norm_layer(norm_first_layer, input_size)
-        final_norm = build_norm_layer(norm_last_layer, output_chans, ndims=2)
+        init_norm = build_norm_layer(dense_normalization_str, norm_first_layer, input_size)
+        final_norm = build_norm_layer(conv_normalization_str, norm_last_layer, output_chans, ndims=2)
 
         # Project to 4x4 first
         self.mlp_proj = nn.Sequential(
             View([-1, input_size]),
             init_norm,
             add_normalization(nn.Linear(input_size, input_size*4*4),
-                              normalization_str, ndims=1, nfeatures=input_size*4*4),
+                              dense_normalization_str, ndims=1, nfeatures=input_size*4*4),
             str_to_activ_module(activation_str)(),
             View([-1, input_size, 4, 4]),
         )
 
         # The main model
+        final_resblock_chans = int(base_channels * (channel_multiplier ** 5))
         self.model = _build_resnet_stack(input_chans=input_size,
-                                         output_chans=output_chans,
+                                         output_chans=final_resblock_chans,
                                          layer_fn=layer_fn,
                                          base_channels=base_channels,
                                          channel_multiplier=channel_multiplier,
                                          kernels=[3, 3, 3, 3, 3],
                                          strides=[1, 1, 1, 1, 1],
                                          resample=[True, True, True, True, True],
-                                         attentions=[True, True, True, True, True],
+                                         attentions=[False, False, False, True, False],
                                          resample_fn=functools.partial(F.interpolate, scale_factor=2),
                                          activation_str=activation_str,
-                                         normalization_str=normalization_str,
+                                         normalization_str=conv_normalization_str,
                                          norm_first_layer=False,  # Handled already
                                          norm_last_layer=True)    # Final conv below
         self.final_conv = nn.Sequential(
             self.act(),
-            nn.Conv2d(output_chans, output_chans, kernel_size=1, stride=1),
+            nn.Conv2d(final_resblock_chans, output_chans, kernel_size=1, stride=1),
             final_norm
         )
 
@@ -1986,7 +2015,7 @@ class Resnet128Decoder(nn.Module):
         outputs = self.final_conv(outputs)
 
         if upsample_last:
-            return F.upsample(outputs, size=outputs.shape[-2:],
+            return F.upsample(outputs, size=(128, 128),
                               mode='bilinear',
                               align_corners=True)
 
@@ -2115,14 +2144,16 @@ class Resnet128Encoder(nn.Module):
                  layer_fn=nn.Conv2d):
         super(Resnet128Encoder, self).__init__()
         assert isinstance(input_chans, (float, int)), "Expect input_size as float or int."
-        self.act = str_to_activ(activation_str)
+        self.act = str_to_activ(activation_str)  # used for intermediary after resnet stack
 
         # The main model
         kernels = [3, 3, 3, 3, 3, 3]
         strides = [1, 1, 1, 1, 1, 1]
         resample = [True, True, True, True, True, False]
+        attentions = [False, False, False, False, True, False]
+        final_resblock_chans = int(base_channels * (channel_multiplier ** len(kernels)))
         self.model = _build_resnet_stack(input_chans=input_chans,
-                                         output_chans=output_size,
+                                         output_chans=final_resblock_chans,
                                          layer_fn=layer_fn,
                                          base_channels=base_channels,
                                          channel_multiplier=channel_multiplier,
@@ -2130,20 +2161,22 @@ class Resnet128Encoder(nn.Module):
                                          strides=strides,
                                          resample=resample,
                                          resample_fn=nn.AvgPool2d(2),
+                                         attentions=attentions,
                                          activation_str=activation_str,
                                          normalization_str=normalization_str,
                                          norm_first_layer=False,  # raw data
-                                         norm_last_layer=True)   # input to 1x1
+                                         norm_last_layer=True)    # input to 1x1
 
         # Handle norm_last_layer if requested
         norm_layer = Identity()
         if norm_last_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
+            gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, output_size)}
             norm_layer = add_normalization(norm_layer, normalization_str,
-                                           ndims=1, nfeatures=input_chans)
+                                           ndims=2, nfeatures=output_size, **gn_groups)
 
         # Do a final linear projection on the pooled representation
         self.final_conv = nn.Sequential(
-            nn.Conv2d(output_size, output_size, kernel_size=1),
+            nn.Conv2d(final_resblock_chans, output_size, kernel_size=1),
             norm_layer
         )
 
@@ -2163,14 +2196,16 @@ class Resnet64Encoder(nn.Module):
                  layer_fn=nn.Conv2d):
         super(Resnet64Encoder, self).__init__()
         assert isinstance(input_chans, (float, int)), "Expect input_size as float or int."
-        self.act = str_to_activ(activation_str)
+        self.act = str_to_activ(activation_str)  # used for intermediary after resnet stack
 
         # The main model
         kernels = [3, 3, 3, 3, 3]
         strides = [1, 1, 1, 1, 1]
         resample = [True, True, True, True, False]
+        attentions = [False, False, False, False, True]
+        final_resblock_chans = int(base_channels * (channel_multiplier ** len(kernels)))
         self.model = _build_resnet_stack(input_chans=input_chans,
-                                         output_chans=output_size,
+                                         output_chans=final_resblock_chans,
                                          layer_fn=layer_fn,
                                          base_channels=base_channels,
                                          channel_multiplier=channel_multiplier,
@@ -2178,6 +2213,7 @@ class Resnet64Encoder(nn.Module):
                                          strides=strides,
                                          resample=resample,
                                          resample_fn=nn.AvgPool2d(2),
+                                         attentions=attentions,
                                          activation_str=activation_str,
                                          normalization_str=normalization_str,
                                          norm_first_layer=False,  # raw data
@@ -2186,12 +2222,13 @@ class Resnet64Encoder(nn.Module):
         # Handle norm_last_layer if requested
         norm_layer = Identity()
         if norm_last_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
+            gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, output_size)}
             norm_layer = add_normalization(norm_layer, normalization_str,
-                                           ndims=1, nfeatures=input_chans)
+                                           ndims=2, nfeatures=output_size, **gn_groups)
 
         # Do a final linear projection on the pooled representation
         self.final_conv = nn.Sequential(
-            nn.Conv2d(output_size, output_size, kernel_size=1),
+            nn.Conv2d(final_resblock_chans, output_size, kernel_size=1),
             norm_layer
         )
 
@@ -2199,7 +2236,7 @@ class Resnet64Encoder(nn.Module):
         """Iterate over each of the layers to produce an output."""
         assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
         outputs = self.model(images)
-        outputs = torch.mean(self.act(outputs), [-2, -1])     # pool over x and y
+        outputs = torch.mean(self.act(outputs), [-2, -1])     # pool over x and y after activating
         outputs = outputs.view(list(outputs.shape) + [1, 1])  # un-flatten and do 1x1
         outputs = self.final_conv(outputs)                    # 1x1 conv
         return outputs
@@ -2211,14 +2248,15 @@ class Resnet32Encoder(nn.Module):
                  layer_fn=nn.Conv2d):
         super(Resnet32Encoder, self).__init__()
         assert isinstance(input_chans, (float, int)), "Expect input_size as float or int."
-        self.act = str_to_activ(activation_str)
+        self.act = str_to_activ(activation_str)  # used for intermediary after resnet stack
 
         # The main model
         kernels = [3, 3, 3, 3]
         strides = [1, 1, 1, 1]
         resample = [True, True, True, False]
+        final_resblock_chans = int(base_channels * (channel_multiplier ** len(kernels)))
         self.model = _build_resnet_stack(input_chans=input_chans,
-                                         output_chans=output_size,
+                                         output_chans=final_resblock_chans,
                                          layer_fn=layer_fn,
                                          base_channels=base_channels,
                                          channel_multiplier=channel_multiplier,
@@ -2234,12 +2272,13 @@ class Resnet32Encoder(nn.Module):
         # Handle norm_last_layer if requested
         norm_layer = Identity()
         if norm_last_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
+            gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, output_size)}
             norm_layer = add_normalization(norm_layer, normalization_str,
-                                           ndims=2, nfeatures=input_chans)
+                                           ndims=2, nfeatures=output_size, **gn_groups)
 
         # Do a final linear projection on the pooled representation
         self.final_conv = nn.Sequential(
-            nn.Conv2d(output_size, output_size, kernel_size=1),
+            nn.Conv2d(final_resblock_chans, output_size, kernel_size=1),
             norm_layer
         )
 
@@ -2247,7 +2286,7 @@ class Resnet32Encoder(nn.Module):
         """Iterate over each of the layers to produce an output."""
         assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
         outputs = self.model(images)
-        outputs = torch.mean(self.act(outputs), [-2, -1])     # pool over x and y
+        outputs = torch.mean(self.act(outputs), [-2, -1])     # pool over x and y after activating
         outputs = outputs.view(list(outputs.shape) + [1, 1])  # un-flatten and do 1x1
         outputs = self.final_conv(outputs)                    # 1x1 conv
         return outputs
@@ -2869,7 +2908,8 @@ def get_conv_decoder(output_shape: Tuple[int, int, int],  # output image shape [
                                     output_chans=output_shape[0],
                                     base_channels=decoder_base_channels,
                                     channel_multiplier=decoder_channel_multiplier,
-                                    normalization_str=conv_normalization,
+                                    conv_normalization_str=conv_normalization,
+                                    dense_normalization_str=dense_normalization,
                                     norm_first_layer=norm_first_layer,
                                     norm_last_layer=norm_last_layer,
                                     activation_str=activation,
@@ -2878,7 +2918,8 @@ def get_conv_decoder(output_shape: Tuple[int, int, int],  # output image shape [
                                      output_chans=output_shape[0],
                                      base_channels=decoder_base_channels,
                                      channel_multiplier=decoder_channel_multiplier,
-                                     normalization_str=conv_normalization,
+                                     conv_normalization_str=conv_normalization,
+                                     dense_normalization_str=dense_normalization,
                                      norm_first_layer=norm_first_layer,
                                      norm_last_layer=norm_last_layer,
                                      activation_str=activation,
@@ -2965,7 +3006,7 @@ def get_decoder(output_shape: Union[int, Tuple[int, int, int]],  # output image 
                 conv_normalization: str = 'none',
                 disable_gated: bool = True,
                 norm_first_layer: bool = True,
-                norm_last_layer: bool = True,
+                norm_last_layer: bool = False,
                 activation: str = 'relu',
                 name: str = 'decoder',
                 **unused_kwargs):
