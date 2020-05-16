@@ -105,32 +105,37 @@ class DistributedDataParallelPassthrough(nn.parallel.DistributedDataParallel):
 class EvoNorm2D(nn.Module):
     """An Evonorm implementation cleaned up from https://bit.ly/2SVb8Az"""
 
-    def __init__(self, num_features, num_groups=32, version='S0',
+    def __init__(self, num_channels, num_groups=32, version='S0',
                  non_linear=True, affine=True, momentum=0.9, eps=1e-5):
         super(EvoNorm2D, self).__init__()
         self.non_linear = non_linear
         self.version = version
         self.momentum = momentum
-        self.groups = num_groups
+        self.num_groups = num_groups
         self.eps = eps
         if self.version not in ['B0', 'S0']:
             raise ValueError("Invalid EvoNorm version")
 
-        self.insize = num_features
+        self.num_channels = num_channels
         self.affine = affine
 
         if self.affine:
-            self.gamma = nn.Parameter(torch.ones(1, self.insize, 1, 1))
-            self.beta = nn.Parameter(torch.zeros(1, self.insize, 1, 1))
+            self.gamma = nn.Parameter(torch.ones(1, self.num_channels, 1, 1))
+            self.beta = nn.Parameter(torch.zeros(1, self.num_channels, 1, 1))
             if self.non_linear:
-                self.v = nn.Parameter(torch.ones(1, self.insize, 1, 1))
+                self.v = nn.Parameter(torch.ones(1, self.num_channels, 1, 1))
         else:
             self.register_parameter('gamma', None)
             self.register_parameter('beta', None)
             self.register_buffer('v', None)
-        self.register_buffer('running_var', torch.ones(1, self.insize, 1, 1))
+        self.register_buffer('running_var', torch.ones(1, self.num_channels, 1, 1))
 
         self.reset_parameters()
+
+    def extra_repr(self):
+        return '{num_channels}, num_groups={num_groups}, version={version}, ' \
+            'non_linear={non_linear}, affine={affine}, momentum={momentum}, ' \
+            'affine={affine}, eps={eps}'.format(**self.__dict__)
 
     @staticmethod
     def instance_std(x, eps=1e-5):
@@ -159,7 +164,7 @@ class EvoNorm2D(nn.Module):
         if self.version == 'S0':
             if self.non_linear:
                 num = x * torch.sigmoid(self.v * x)
-                return num / self.group_std(x, groups=self.groups, eps=self.eps) * self.gamma + self.beta
+                return num / self.group_std(x, groups=self.num_groups, eps=self.eps) * self.gamma + self.beta
 
             return x * self.gamma + self.beta
 
@@ -937,44 +942,40 @@ def init_weights(module, init='orthogonal'):
     return module
 
 
-def _compute_group_norm_planes(normalization_str, planes):
+def _compute_group_norm_planes(planes):
     """ Intelligent helper to compute sane group-norm planes.
 
-    :param normalization_str: the type of normalization
     :param planes: the output channels
     :returns: number to use for group norm
     :rtype: int
 
     """
-    gn_planes = 0
-
     def factors(n):
         # find all factors of the number n; from https://bit.ly/36a087J
         from functools import reduce
         return set(reduce(list.__add__, ([i, n//i] for i in range(1, int(n**0.5) + 1) if n % i == 0)))
 
-    if normalization_str == 'groupnorm':
-        all_factors = factors(planes)
+    all_factors = factors(planes)
 
-        if 32 in all_factors and planes != 32:  # If we can divide by 32 (default value from paper) go for it
-            gn_planes = 32
+    if 32 in all_factors and planes != 32:  # If we can divide by 32 (default value from paper) go for it
+        gn_planes = 32
+    else:
+        if planes % 2 == 0 and planes < 32:                # handles < 32 planes smartly
+            gn_planes = max(int(np.ceil(planes / 2)), 1)
+        elif planes % 3 == 0 and planes < 32:              # handles < 32 planes smartly
+            gn_planes = max(int(np.ceil(planes / 3)), 1)
         else:
-            if planes % 2 == 0 and planes < 32:                # handles < 32 planes smartly
-                gn_planes = max(int(np.ceil(planes / 2)), 1)
-            elif planes % 3 == 0 and planes < 32:              # handles < 32 planes smartly
-                gn_planes = max(int(np.ceil(planes / 3)), 1)
+            # Find the closest factor to 32 that can divide planes
+            # and return the value closest than 32 that can divide it.
+            all_factors.add(32)
+            all_factors = sorted(list(all_factors))
+            idx_of_32 = all_factors.index(32)
+            closest_smaller = all_factors[idx_of_32 - 1]
+            closest_bigger = all_factors[idx_of_32 + 1] if idx_of_32 + 1 > len(all_factors) else planes
+            if (32 - closest_smaller < closest_bigger - 32) or closest_bigger == planes:
+                gn_planes = closest_smaller
             else:
-                # Find the closest factor to 32 that can divide planes
-                # and return the value closest than 32 that can divide it.
-                all_factors.add(32)
-                all_factors = sorted(list(all_factors))
-                idx_of_32 = all_factors.index(32)
-                closest_smaller = all_factors[idx_of_32 - 1]
-                closest_bigger = all_factors[idx_of_32 + 1] if idx_of_32 + 1 > len(all_factors) else planes
-                if (32 - closest_smaller < closest_bigger - 32) or closest_bigger == planes:
-                    gn_planes = closest_smaller
-                else:
-                    gn_planes = closest_bigger
+                gn_planes = closest_bigger
 
     return gn_planes
 
@@ -1273,8 +1274,8 @@ class BasicBlock(nn.Module):
                  normalization_str="batchnorm", init_norm=True,
                  activation_str="relu", **kwargs):
         super(BasicBlock, self).__init__()
-        gn_in_groups = {"num_groups": _compute_group_norm_planes(normalization_str, in_channels)}
-        gn_out_groups = {"num_groups": _compute_group_norm_planes(normalization_str, out_channels)}
+        gn_in_groups = {"num_groups": _compute_group_norm_planes(in_channels)}
+        gn_out_groups = {"num_groups": _compute_group_norm_planes(out_channels)}
         norm_fn = functools.partial(
             add_normalization, normalization_str=normalization_str,
             ndims=2, nfeatures=out_channels)
@@ -1317,9 +1318,9 @@ class BottleneckBlock(nn.Module):
                  normalization_str="batchnorm", init_norm=True,
                  activation_str="relu", **kwargs):
         super(BottleneckBlock, self).__init__()
-        gn_in_groups = {"num_groups": _compute_group_norm_planes(normalization_str, in_channels)}
-        gn_half_groups = {"num_groups": _compute_group_norm_planes(normalization_str, out_channels // 2)}
-        gn_out_groups = {"num_groups": _compute_group_norm_planes(normalization_str, out_channels)}
+        gn_in_groups = {"num_groups": _compute_group_norm_planes(in_channels)}
+        gn_half_groups = {"num_groups": _compute_group_norm_planes(out_channels // 2)}
+        gn_out_groups = {"num_groups": _compute_group_norm_planes(out_channels)}
         norm_fn = functools.partial(
             add_normalization, normalization_str=normalization_str,
             ndims=2, nfeatures=out_channels // 2)
@@ -1481,10 +1482,10 @@ def add_normalization(module, normalization_str, ndims, nfeatures, **kwargs):
             2: lambda nfeatures, **kwargs: nn.GroupNorm(kwargs['num_groups'], nfeatures)
         },
         'evonorms0': {
-            2: lambda nfeatures, **kwargs: EvoNorm2D(nfeatures, kwargs['num_groups']),
+            2: lambda nfeatures, **kwargs: EvoNorm2D(nfeatures, num_groups=kwargs['num_groups']),
         },
         'evonormb0': {
-            2: lambda nfeatures, **kwargs: EvoNorm2D(nfeatures, kwargs['num_groups'], version='B0'),
+            2: lambda nfeatures, **kwargs: EvoNorm2D(nfeatures, version='B0'),
         },
         'batch_groupnorm': {
             2: lambda nfeatures, **kwargs: BatchGroupNorm(kwargs['num_groups'], nfeatures)
@@ -1570,7 +1571,7 @@ def _build_resnet_stack(input_chans, output_chans,
     layers = []
 
     # if norm_first_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
-    #     init_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, input_chans)}
+    #     init_gn_groups = {'num_groups': _compute_group_norm_planes(input_chans)}
     #     layers.append(norm_fn(nfeatures=input_chans, **init_gn_groups))
     #     # layers.append(activation_fn())  # TODO(jramapuram): consider this.
 
@@ -1605,7 +1606,7 @@ def _build_resnet_stack(input_chans, output_chans,
 
     # Add normalization to the final layer if requested
     if norm_last_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
-        final_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, output_chans)}
+        final_gn_groups = {'num_groups': _compute_group_norm_planes(output_chans)}
         layers.append(norm_fn(nfeatures=channels[-1], **final_gn_groups))
 
     return nn.Sequential(*layers)
@@ -1653,7 +1654,7 @@ def _build_conv_stack(input_chans, output_chans,
     layers = []
 
     if norm_first_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
-        init_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, input_chans)}
+        init_gn_groups = {'num_groups': _compute_group_norm_planes(input_chans)}
         layers.append(norm_fn(Identity(), nfeatures=input_chans, **init_gn_groups))
         # layers.append(activation_fn())  # TODO(jramapuram): consider this.
 
@@ -1671,7 +1672,7 @@ def _build_conv_stack(input_chans, output_chans,
             normalization_str = 'none' if norm_last_layer is False else normalization_str
             norm_fn = functools.partial(norm_fn, normalization_str=normalization_str)
 
-        li_gn_groups = {'num_groups': _compute_group_norm_planes(normalization_str, chan_out)}
+        li_gn_groups = {'num_groups': _compute_group_norm_planes(chan_out)}
         layer_i = norm_fn(layer_fn(chan_in, chan_out, kernel_size=k, stride=s),
                           nfeatures=chan_out, **li_gn_groups)
         layers.append(layer_i)
@@ -1733,15 +1734,15 @@ class Attention(nn.Module):
 
 class Conv32UpsampleDecoder(nn.Module):
     def __init__(self, input_size, output_chans, base_channels=1024, channel_multiplier=0.5,
-                 activation_str="relu", normalization_str="none", norm_first_layer=True,
-                 norm_last_layer=False, layer_fn=UpsampleConvLayer):
+                 activation_str="relu", conv_normalization_str="none", dense_normalization_str="none",
+                 norm_first_layer=True, norm_last_layer=False, layer_fn=UpsampleConvLayer):
         super(Conv32UpsampleDecoder, self).__init__()
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
 
         # Handle pre-decoder normalization
         norm_layer = Identity()
-        if norm_first_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
-            norm_layer = add_normalization(norm_layer, normalization_str,
+        if norm_first_layer and dense_normalization_str not in ['weightnorm', 'spectralnorm']:
+            norm_layer = add_normalization(norm_layer, dense_normalization_str,
                                            ndims=1, nfeatures=input_size)
 
         # Project to 4x4 first
@@ -1749,8 +1750,8 @@ class Conv32UpsampleDecoder(nn.Module):
             View([-1, input_size]),
             norm_layer,
             add_normalization(nn.Linear(input_size, input_size*4*4),
-                              normalization_str, ndims=1, nfeatures=input_size*4*4),
-            str_to_activ_module(activation_str)(),
+                              dense_normalization_str, ndims=1, nfeatures=input_size*4*4),
+            str_to_activ_module(activation_str if 'evonorm' not in conv_normalization_str else 'relu')(),
             View([-1, input_size, 4, 4]),
         )
 
@@ -1763,7 +1764,7 @@ class Conv32UpsampleDecoder(nn.Module):
                                        kernels=[3, 3, 3],
                                        strides=[1, 1, 1],
                                        activation_str=activation_str,
-                                       normalization_str=normalization_str,
+                                       normalization_str=conv_normalization_str,
                                        norm_first_layer=False,  # Handled already
                                        norm_last_layer=norm_last_layer)
 
@@ -1776,7 +1777,7 @@ class Conv32UpsampleDecoder(nn.Module):
         outputs = self.model(outputs)
 
         if upsample_last:
-            return F.upsample(outputs, size=outputs.shape[-2:],
+            return F.upsample(outputs, size=(32, 32),
                               mode='bilinear',
                               align_corners=True)
 
@@ -1827,7 +1828,7 @@ class Resnet32Decoder(nn.Module):
         def build_norm_layer(normalization_str, use_norm, feature_size, ndims=1):
             norm_layer = Identity()
             if use_norm and normalization_str not in ['weightnorm', 'spectralnorm'] and normalization_str != 'none':
-                gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, feature_size)}
+                gn_groups = {"num_groups": _compute_group_norm_planes(feature_size)}
                 norm_layer = add_normalization(norm_layer, normalization_str,
                                                ndims=ndims, nfeatures=feature_size, **gn_groups)
             return norm_layer
@@ -1841,7 +1842,7 @@ class Resnet32Decoder(nn.Module):
             init_norm,
             add_normalization(nn.Linear(input_size, input_size*4*4),
                               dense_normalization_str, ndims=1, nfeatures=input_size*4*4),
-            str_to_activ_module(activation_str)(),
+            str_to_activ_module(activation_str if 'evonorm' not in conv_normalization_str else 'relu')(),
             View([-1, input_size, 4, 4]),
         )
 
@@ -1896,7 +1897,7 @@ class Resnet64Decoder(nn.Module):
         def build_norm_layer(normalization_str, use_norm, feature_size, ndims=1):
             norm_layer = Identity()
             if use_norm and normalization_str not in ['weightnorm', 'spectralnorm']:
-                gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, feature_size)}
+                gn_groups = {"num_groups": _compute_group_norm_planes(feature_size)}
                 norm_layer = add_normalization(norm_layer, normalization_str,
                                                ndims=ndims, nfeatures=feature_size, **gn_groups)
             return norm_layer
@@ -1910,7 +1911,7 @@ class Resnet64Decoder(nn.Module):
             init_norm,
             add_normalization(nn.Linear(input_size, input_size*4*4),
                               dense_normalization_str, ndims=1, nfeatures=input_size*4*4),
-            str_to_activ_module(activation_str)(),
+            str_to_activ_module(activation_str if 'evonorm' not in conv_normalization_str else 'relu')(),
             View([-1, input_size, 4, 4]),
         )
 
@@ -1965,7 +1966,7 @@ class Resnet128Decoder(nn.Module):
         def build_norm_layer(normalization_str, use_norm, feature_size, ndims=1):
             norm_layer = Identity()
             if use_norm and normalization_str not in ['weightnorm', 'spectralnorm']:
-                gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, feature_size)}
+                gn_groups = {"num_groups": _compute_group_norm_planes(feature_size)}
                 norm_layer = add_normalization(norm_layer, normalization_str,
                                                ndims=ndims, nfeatures=feature_size, **gn_groups)
             return norm_layer
@@ -1979,7 +1980,7 @@ class Resnet128Decoder(nn.Module):
             init_norm,
             add_normalization(nn.Linear(input_size, input_size*4*4),
                               dense_normalization_str, ndims=1, nfeatures=input_size*4*4),
-            str_to_activ_module(activation_str)(),
+            str_to_activ_module(activation_str if 'evonorm' not in conv_normalization_str else 'relu')(),
             View([-1, input_size, 4, 4]),
         )
 
@@ -2170,7 +2171,7 @@ class Resnet128Encoder(nn.Module):
         # Handle norm_last_layer if requested
         norm_layer = Identity()
         if norm_last_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
-            gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, output_size)}
+            gn_groups = {"num_groups": _compute_group_norm_planes(output_size)}
             norm_layer = add_normalization(norm_layer, normalization_str,
                                            ndims=2, nfeatures=output_size, **gn_groups)
 
@@ -2222,7 +2223,7 @@ class Resnet64Encoder(nn.Module):
         # Handle norm_last_layer if requested
         norm_layer = Identity()
         if norm_last_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
-            gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, output_size)}
+            gn_groups = {"num_groups": _compute_group_norm_planes(output_size)}
             norm_layer = add_normalization(norm_layer, normalization_str,
                                            ndims=2, nfeatures=output_size, **gn_groups)
 
@@ -2272,7 +2273,7 @@ class Resnet32Encoder(nn.Module):
         # Handle norm_last_layer if requested
         norm_layer = Identity()
         if norm_last_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
-            gn_groups = {"num_groups": _compute_group_norm_planes(normalization_str, output_size)}
+            gn_groups = {"num_groups": _compute_group_norm_planes(output_size)}
             norm_layer = add_normalization(norm_layer, normalization_str,
                                            ndims=2, nfeatures=output_size, **gn_groups)
 
