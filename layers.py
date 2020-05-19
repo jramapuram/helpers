@@ -2307,7 +2307,8 @@ class Resnet32Encoder(nn.Module):
 class TorchvisionEncoder(nn.Module):
     """Wraps torchvision models such as Resnet50, etc."""
     def __init__(self, pretrained_output_size, output_size, latent_size=512, activation_str="relu",
-                 normalization_str="none", norm_first_layer=False, norm_last_layer=False,
+                 conv_normalization_str="none", dense_normalization_str="none",
+                 norm_first_layer=False, norm_last_layer=False,
                  layer_fn=models.resnet50, pretrained=False, freeze_base=False,
                  **unused_args):
         """ Wrap a torchvision encoder such as resnet50 and adds an FC.
@@ -2316,7 +2317,8 @@ class TorchvisionEncoder(nn.Module):
         :param output_size: output size for FC projection
         :param latent_size: latent size for FC projection
         :param activation_str: activation for FC layers
-        :param normalization_str: normalization for FC
+        :param conv_normalization_str: NOTE: ONLY used to convert BN --> SyncBN
+        :param dense_normalization_str: dense projection layer normalization
         :param norm_first_layer: norm input to FC (output of base model)
         :param norm_last_layer: norm output of FC
         :param layer_fn: layer fn for FC
@@ -2331,7 +2333,6 @@ class TorchvisionEncoder(nn.Module):
         self.latent_size = latent_size
         self.norm_first_layer = norm_first_layer
         self.norm_last_layer = norm_last_layer
-        self.normalization_str = normalization_str
         self.activation_str = activation_str
 
         # Compute the input image size; TODO(jramapuram): do we need this for non-pretrained?
@@ -2343,7 +2344,7 @@ class TorchvisionEncoder(nn.Module):
         self.model = nn.Sequential(
             *list(layer_fn(pretrained=pretrained).children())[:-1]
         )
-        if normalization_str == 'sync_batchnorm':
+        if conv_normalization_str == 'sync_batchnorm':
             self.model = nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
 
         # Freeze base model if requested
@@ -2358,7 +2359,7 @@ class TorchvisionEncoder(nn.Module):
                                num_layers=3,  # XXX(jramapuram): hardcoded for now
                                layer_fn=nn.Linear,
                                activation_str=self.activation_str,
-                               normalization_str=self.normalization_str,
+                               normalization_str=dense_normalization_str,
                                norm_first_layer=self.norm_first_layer,
                                norm_last_layer=self.norm_last_layer)
 
@@ -2591,122 +2592,32 @@ class DenseDecoder(Dense):
                                            layer_fn=layer_fn)
 
 
-def get_conv_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
-                     encoder_layer_type: str = 'conv',
-                     encoder_base_channels: int = 32,  # For conv models
-                     encoder_channel_multiplier: int = 2,
-                     latent_size: int = 512,   # For dense models
-                     dense_normalization: str = 'none',
-                     conv_normalization: str = 'none',
-                     disable_gated: bool = True,
-                     norm_first_layer: bool = False,
-                     norm_last_layer: bool = False,
-                     activation: str = 'relu',
-                     pretrained: bool = True,
-                     name: str = 'encoder',
-                     **unused_kwargs):
-    '''Helper to return the correct encoder function.'''
-    conv_size_dict = {
-        128: Conv128Encoder,
-        64: Conv64Encoder,
-        32: Conv32Encoder,
-        28: Conv28Encoder,
-    }
+#                           _
+#                          | |
+#   ___ _ __   ___ ___   __| | ___ _ __ ___
+#  / _ \ '_ \ / __/ _ \ / _` |/ _ \ '__/ __|
+# |  __/ | | | (_| (_) | (_| |  __/ |  \__ \
+#  \___|_| |_|\___\___/ \__,_|\___|_|  |___/
+#
+
+def get_resnet_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
+                       encoder_base_channels: int = 32,    # For conv models
+                       encoder_channel_multiplier: int = 2,
+                       conv_normalization: str = 'none',
+                       disable_gated: bool = True,
+                       norm_first_layer: bool = False,
+                       norm_last_layer: bool = False,
+                       activation: str = 'relu',
+                       name: str = 'encoder',
+                       **unused_kwargs):
     resnet_size_dict = {
         128: Resnet128Encoder,
         64: Resnet64Encoder,
         32: Resnet32Encoder,
-        28: lambda **kwargs: None  # XXX: fix
     }
     chans, image_size = input_shape[0], input_shape[-1]
 
-    # Mega-dict that curried the appropriate encoder.
-    # The returned encoder still needs the CTOR, eg: enc(input_shape)
     net_map = {
-        'resnext50_32x4d': {
-            False: functools.partial(TorchvisionEncoder,
-                                     pretrained_output_size=2048,  # rx50-x4 avg-pool size
-                                     latent_size=latent_size,
-                                     activation_str=activation,
-                                     normalization_str=conv_normalization,
-                                     norm_first_layer=norm_first_layer,
-                                     norm_last_layer=norm_last_layer,
-                                     pretrained=pretrained,
-                                     freeze_base=False,  # TODO(jramapuram): parameterize
-                                     layer_fn=models.resnext50_32x4d),
-        },
-        'resnet50': {
-            False: functools.partial(TorchvisionEncoder,
-                                     pretrained_output_size=2048,  # r50 avg-pool size
-                                     latent_size=latent_size,
-                                     activation_str=activation,
-                                     normalization_str=conv_normalization,
-                                     norm_first_layer=norm_first_layer,
-                                     norm_last_layer=norm_last_layer,
-                                     pretrained=pretrained,
-                                     freeze_base=False,  # TODO(jramapuram): parameterize
-                                     layer_fn=models.resnet50),
-        },
-        'resnet34': {
-            False: functools.partial(TorchvisionEncoder,
-                                     pretrained_output_size=512,  # r34 avg-pool size
-                                     latent_size=latent_size,
-                                     activation_str=activation,
-                                     normalization_str=conv_normalization,
-                                     norm_first_layer=norm_first_layer,
-                                     norm_last_layer=norm_last_layer,
-                                     pretrained=pretrained,
-                                     freeze_base=False,  # TODO(jramapuram): parameterize
-                                     layer_fn=models.resnet34),
-        },
-        'resnet18': {
-            False: functools.partial(TorchvisionEncoder,
-                                     pretrained_output_size=512,  # r18 avg-pool size
-                                     latent_size=latent_size,
-                                     activation_str=activation,
-                                     normalization_str=conv_normalization,
-                                     norm_first_layer=norm_first_layer,
-                                     norm_last_layer=norm_last_layer,
-                                     pretrained=pretrained,
-                                     freeze_base=False,  # TODO(jramapuram): parameterize
-                                     layer_fn=models.resnet18),
-        },
-        'shufflenet_v2_x0_5': {
-            False: functools.partial(TorchvisionEncoder,
-                                     pretrained_output_size=1024,  # r34 avg-pool size
-                                     latent_size=latent_size,
-                                     activation_str=activation,
-                                     normalization_str=conv_normalization,
-                                     norm_first_layer=norm_first_layer,
-                                     norm_last_layer=norm_last_layer,
-                                     pretrained=pretrained,
-                                     freeze_base=False,  # TODO(jramapuram): parameterize
-                                     layer_fn=models.shufflenet_v2_x0_5),
-        },
-        'mobilenet_v2': {
-            False: functools.partial(TorchvisionEncoder,
-                                     pretrained_output_size=1280,  # mobilenet_v2 pool size
-                                     latent_size=latent_size,
-                                     activation_str=activation,
-                                     normalization_str=conv_normalization,
-                                     norm_first_layer=norm_first_layer,
-                                     norm_last_layer=norm_last_layer,
-                                     pretrained=pretrained,
-                                     freeze_base=False,  # TODO(jramapuram): parameterize
-                                     layer_fn=models.mobilenet_v2),
-        },
-        'densenet121': {
-            False: functools.partial(TorchvisionEncoder,
-                                     pretrained_output_size=1024,  # densenet pool size
-                                     latent_size=latent_size,
-                                     activation_str=activation,
-                                     normalization_str=conv_normalization,
-                                     norm_first_layer=norm_first_layer,
-                                     norm_last_layer=norm_last_layer,
-                                     pretrained=pretrained,
-                                     freeze_base=False,  # TODO(jramapuram): parameterize
-                                     layer_fn=models.densenet121),
-        },
         'resnet': {
             # True for gated, False for non-gated
             True: functools.partial(resnet_size_dict[image_size],
@@ -2726,6 +2637,153 @@ def get_conv_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
                                      activation_str=activation,
                                      layer_fn=nn.Conv2d),
         },
+    }
+    fn = net_map["resnet"][not disable_gated]
+    print("using {} {} for {}".format(
+        "gated" if not disable_gated else "standard",
+        "resnet",
+        name
+    ))
+    return fn
+
+
+def get_torchvision_encoder(encoder_layer_type: str = 'conv',
+                            latent_size: int = 512,   # For dense projection from embedding
+                            dense_normalization: str = 'none',
+                            conv_normalization: str = 'none',
+                            norm_first_layer: bool = False,
+                            norm_last_layer: bool = False,
+                            activation: str = 'relu',
+                            pretrained: bool = True,
+                            freeze_base: bool = False,
+                            name: str = 'encoder',
+                            **unused_kwargs):
+    net_map = {
+        'resnext50_32x4d': {
+            False: functools.partial(TorchvisionEncoder,
+                                     pretrained_output_size=2048,  # rx50-x4 avg-pool size
+                                     latent_size=latent_size,
+                                     activation_str=activation,
+                                     conv_normalization_str=conv_normalization,
+                                     dense_normalization_str=conv_normalization,
+                                     norm_first_layer=norm_first_layer,
+                                     norm_last_layer=norm_last_layer,
+                                     pretrained=pretrained,
+                                     freeze_base=freeze_base,
+                                     layer_fn=models.resnext50_32x4d),
+        },
+        'resnet50': {
+            False: functools.partial(TorchvisionEncoder,
+                                     pretrained_output_size=2048,  # r50 avg-pool size
+                                     latent_size=latent_size,
+                                     activation_str=activation,
+                                     conv_normalization_str=conv_normalization,
+                                     dense_normalization_str=conv_normalization,
+                                     norm_first_layer=norm_first_layer,
+                                     norm_last_layer=norm_last_layer,
+                                     pretrained=pretrained,
+                                     freeze_base=freeze_base,
+                                     layer_fn=models.resnet50),
+        },
+        'resnet34': {
+            False: functools.partial(TorchvisionEncoder,
+                                     pretrained_output_size=512,  # r34 avg-pool size
+                                     latent_size=latent_size,
+                                     activation_str=activation,
+                                     conv_normalization_str=conv_normalization,
+                                     dense_normalization_str=conv_normalization,
+                                     norm_first_layer=norm_first_layer,
+                                     norm_last_layer=norm_last_layer,
+                                     pretrained=pretrained,
+                                     freeze_base=freeze_base,
+                                     layer_fn=models.resnet34),
+        },
+        'resnet18': {
+            False: functools.partial(TorchvisionEncoder,
+                                     pretrained_output_size=512,  # r18 avg-pool size
+                                     latent_size=latent_size,
+                                     activation_str=activation,
+                                     conv_normalization_str=conv_normalization,
+                                     dense_normalization_str=conv_normalization,
+                                     norm_first_layer=norm_first_layer,
+                                     norm_last_layer=norm_last_layer,
+                                     pretrained=pretrained,
+                                     freeze_base=freeze_base,
+                                     layer_fn=models.resnet18),
+        },
+        'shufflenet_v2_x0_5': {
+            False: functools.partial(TorchvisionEncoder,
+                                     pretrained_output_size=1024,  # r34 avg-pool size
+                                     latent_size=latent_size,
+                                     activation_str=activation,
+                                     conv_normalization_str=conv_normalization,
+                                     dense_normalization_str=conv_normalization,
+                                     norm_first_layer=norm_first_layer,
+                                     norm_last_layer=norm_last_layer,
+                                     pretrained=pretrained,
+                                     freeze_base=freeze_base,
+                                     layer_fn=models.shufflenet_v2_x0_5),
+        },
+        'mobilenet_v2': {
+            False: functools.partial(TorchvisionEncoder,
+                                     pretrained_output_size=1280,  # mobilenet_v2 pool size
+                                     latent_size=latent_size,
+                                     activation_str=activation,
+                                     conv_normalization_str=conv_normalization,
+                                     dense_normalization_str=conv_normalization,
+                                     norm_first_layer=norm_first_layer,
+                                     norm_last_layer=norm_last_layer,
+                                     pretrained=pretrained,
+                                     freeze_base=freeze_base,
+                                     layer_fn=models.mobilenet_v2),
+        },
+        'densenet121': {
+            False: functools.partial(TorchvisionEncoder,
+                                     pretrained_output_size=1024,  # densenet pool size
+                                     latent_size=latent_size,
+                                     activation_str=activation,
+                                     conv_normalization_str=conv_normalization,
+                                     dense_normalization_str=conv_normalization,
+                                     norm_first_layer=norm_first_layer,
+                                     norm_last_layer=norm_last_layer,
+                                     pretrained=pretrained,
+                                     freeze_base=freeze_base,
+                                     layer_fn=models.densenet121),
+        },
+    }
+
+    fn = net_map[encoder_layer_type][False]
+    print("using {} for {}".format(
+        encoder_layer_type,
+        name
+    ))
+    return fn
+
+
+def get_conv_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
+                     encoder_layer_type: str = 'conv',
+                     encoder_base_channels: int = 32,  # For conv models
+                     encoder_channel_multiplier: int = 2,
+                     conv_normalization: str = 'none',
+                     disable_gated: bool = True,
+                     norm_first_layer: bool = False,
+                     norm_last_layer: bool = False,
+                     activation: str = 'relu',
+                     pretrained: bool = True,
+                     name: str = 'encoder',
+                     **unused_kwargs):
+    '''Helper to return the correct encoder function.'''
+    conv_size_dict = {
+        128: Conv128Encoder,
+        64: Conv64Encoder,
+        32: Conv32Encoder,
+        28: Conv28Encoder,
+    }
+    chans, image_size = input_shape[0], input_shape[-1]
+
+    # Mega-dict that curried the appropriate encoder.
+    # The returned encoder still needs the CTOR, eg: enc(input_shape)
+    net_map = {
         'conv': {
             True: functools.partial(conv_size_dict[image_size],
                                     input_chans=chans,
@@ -2792,7 +2850,6 @@ def get_conv_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
 
 
 def get_dense_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W]
-                      encoder_layer_type: str = 'dense',
                       latent_size: int = 512,   # For dense models
                       num_layers: int = 3,      # For dense models
                       dense_normalization: str = 'none',
@@ -2829,10 +2886,10 @@ def get_dense_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W
         }
     }
 
-    fn = net_map[encoder_layer_type][not disable_gated]
+    fn = net_map["dense"][not disable_gated]
     print("using {} {} for {}".format(
         "gated" if not disable_gated else "standard",
-        encoder_layer_type,
+        "dense",
         name
     ))
     return fn
@@ -2851,16 +2908,27 @@ def get_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W]
                 norm_last_layer: bool = False,
                 activation: str = 'relu',
                 pretrained: bool = False,
+                freeze_base: bool = False,
                 name: str = 'encoder',
                 **unused_kwargs):
     '''Helper to return the correct encoder function.'''
-    if encoder_layer_type != 'dense':
+    if encoder_layer_type in ['resnext50_32x4d', 'resnet50', 'resnet34', 'resnet18',
+                              'shufflenet_v2_x0_5', 'mobilenet_v2', 'densenet121']:
+        return get_torchvision_encoder(encoder_layer_type=encoder_layer_type,
+                                       latent_size=latent_size,
+                                       dense_normalization=dense_normalization,
+                                       conv_normalization=conv_normalization,
+                                       norm_first_layer=norm_first_layer,
+                                       norm_last_layer=norm_last_layer,
+                                       activation=activation,
+                                       pretrained=pretrained,
+                                       freeze_base=freeze_base,
+                                       name=name, **unused_kwargs)
+    elif encoder_layer_type in ['conv', 'batch_conv', 'coordconv']:
         return get_conv_encoder(input_shape=input_shape,
                                 encoder_layer_type=encoder_layer_type,
                                 encoder_base_channels=encoder_base_channels,
                                 encoder_channel_multiplier=encoder_channel_multiplier,
-                                latent_size=latent_size,
-                                dense_normalization=dense_normalization,
                                 conv_normalization=conv_normalization,
                                 disable_gated=disable_gated,
                                 norm_first_layer=norm_first_layer,
@@ -2868,46 +2936,57 @@ def get_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W]
                                 activation=activation,
                                 pretrained=pretrained,
                                 name=name, **unused_kwargs)
+    elif encoder_layer_type == 'resnet':
+        return get_resnet_encoder(input_shape=input_shape,
+                                  encoder_base_channels=encoder_base_channels,
+                                  encoder_channel_multiplier=encoder_channel_multiplier,
+                                  latent_size=latent_size,
+                                  dense_normalization=dense_normalization,
+                                  conv_normalization=conv_normalization,
+                                  disable_gated=disable_gated,
+                                  norm_first_layer=norm_first_layer,
+                                  norm_last_layer=norm_last_layer,
+                                  activation=activation,
+                                  pretrained=pretrained,
+                                  name=name, **unused_kwargs)
+    elif encoder_layer_type == 'dense':
+        return get_dense_encoder(input_shape=input_shape,
+                                 latent_size=latent_size,
+                                 num_layers=num_layers,
+                                 dense_normalization=dense_normalization,
+                                 disable_gated=disable_gated,
+                                 norm_first_layer=norm_first_layer,
+                                 norm_last_layer=norm_last_layer,
+                                 activation=activation,
+                                 pretrained=pretrained,
+                                 name=name, **unused_kwargs)
+    else:
+        raise ValueError("unknown encoder requested: {}".format(encoder_layer_type))
 
-    return get_dense_encoder(input_shape=input_shape,
-                             encoder_layer_type=encoder_layer_type,
-                             latent_size=latent_size,
-                             num_layers=num_layers,
-                             dense_normalization=dense_normalization,
-                             disable_gated=disable_gated,
-                             norm_first_layer=norm_first_layer,
-                             norm_last_layer=norm_last_layer,
-                             activation=activation,
-                             pretrained=pretrained,
-                             name=name, **unused_kwargs)
 
-
-def get_conv_decoder(output_shape: Tuple[int, int, int],  # output image shape [B, H, W]
-                     decoder_layer_type: str = 'conv',
-                     decoder_base_channels: int = 1024,      # For conv models
-                     decoder_channel_multiplier: int = 0.5,  # Decoding shrinks channels
-                     latent_size: int = 512,         # For dense models
-                     dense_normalization: str = 'none',
-                     conv_normalization: str = 'none',
-                     disable_gated: bool = True,
-                     norm_first_layer: bool = True,
-                     norm_last_layer: bool = False,
-                     activation: str = 'relu',
-                     name: str = 'decoder',
-                     **unused_kwargs):
-    '''Helper to return the correct decoder function.'''
-    conv_size_dict = {
-        128: Conv128Decoder,
-        64: Conv64Decoder,
-        32: Conv32Decoder,
-        # 32: Conv32UpsampleDecoder,
-        28: Conv28Decoder,
-    }
+#      _                    _
+#     | |                  | |
+#   __| | ___  ___ ___   __| | ___ _ __ ___
+#  / _` |/ _ \/ __/ _ \ / _` |/ _ \ '__/ __|
+# | (_| |  __/ (_| (_) | (_| |  __/ |  \__ \
+#  \__,_|\___|\___\___/ \__,_|\___|_|  |___/
+#
+def get_resnet_decoder(output_shape: Tuple[int, int, int],  # output image shape [B, H, W]
+                       decoder_base_channels: int = 1024,      # For conv models
+                       decoder_channel_multiplier: int = 0.5,  # Decoding shrinks channels
+                       dense_normalization: str = 'none',
+                       conv_normalization: str = 'none',
+                       disable_gated: bool = True,
+                       norm_first_layer: bool = True,
+                       norm_last_layer: bool = False,
+                       activation: str = 'relu',
+                       name: str = 'decoder',
+                       **unused_kwargs):
+    """Simple helper to return the correct resnet decoder model."""
     resnet_size_dict = {
         128: Resnet128Decoder,
         64: Resnet64Decoder,
         32: Resnet32Decoder,
-        28: lambda **kwargs: None  # XXX: fix
     }
     image_size = output_shape[-1]
 
@@ -2937,6 +3016,42 @@ def get_conv_decoder(output_shape: Tuple[int, int, int],  # output image shape [
                                      activation_str=activation,
                                      layer_fn=nn.Conv2d)
         },
+    }
+    fn = net_map["resnet"][not disable_gated]
+    print("using {} {} for {}".format(
+        "gated" if not disable_gated else "standard",
+        "resnet",
+        name
+    ))
+    return fn
+
+
+def get_conv_decoder(output_shape: Tuple[int, int, int],  # output image shape [B, H, W]
+                     decoder_layer_type: str = 'conv',
+                     decoder_base_channels: int = 1024,      # For conv models
+                     decoder_channel_multiplier: int = 0.5,  # Decoding shrinks channels
+                     latent_size: int = 512,         # For dense models
+                     dense_normalization: str = 'none',
+                     conv_normalization: str = 'none',
+                     disable_gated: bool = True,
+                     norm_first_layer: bool = True,
+                     norm_last_layer: bool = False,
+                     activation: str = 'relu',
+                     name: str = 'decoder',
+                     **unused_kwargs):
+    '''Helper to return the correct decoder function.'''
+    conv_size_dict = {
+        128: Conv128Decoder,
+        64: Conv64Decoder,
+        32: Conv32Decoder,
+        # 32: Conv32UpsampleDecoder,
+        28: Conv28Decoder,
+    }
+    image_size = output_shape[-1]
+
+    # Mega-dict that curried the appropriate decoder.
+    # The returned decoder still needs the CTOR, eg: dec(input_size)
+    net_map = {
         'conv': {
             True: functools.partial(conv_size_dict[image_size],
                                     output_chans=output_shape[0],
@@ -3008,35 +3123,16 @@ def get_conv_decoder(output_shape: Tuple[int, int, int],  # output image shape [
     return fn
 
 
-def get_decoder(output_shape: Union[int, Tuple[int, int, int]],  # output image shape [B, H, W]
-                decoder_layer_type: str = 'conv',
-                decoder_base_channels: int = 1024,      # For conv models
-                decoder_channel_multiplier: int = 0.5,  # Decoding shrinks channels
-                latent_size: int = 512,   # For dense models
-                num_layers: int = 3,      # For dense models
-                dense_normalization: str = 'none',
-                conv_normalization: str = 'none',
-                disable_gated: bool = True,
-                norm_first_layer: bool = True,
-                norm_last_layer: bool = False,
-                activation: str = 'relu',
-                name: str = 'decoder',
-                **unused_kwargs):
-    '''Helper to return the correct decoder function.'''
-    if decoder_layer_type != 'dense':
-        return get_conv_decoder(output_shape=output_shape,
-                                decoder_layer_type=decoder_layer_type,
-                                decoder_base_channels=decoder_base_channels,
-                                decoder_channel_multiplier=decoder_channel_multiplier,
-                                latent_size=latent_size,
-                                dense_normalization=dense_normalization,
-                                conv_normalization=conv_normalization,
-                                disable_gated=disable_gated,
-                                norm_first_layer=norm_first_layer,
-                                norm_last_layer=norm_last_layer,
-                                activation=activation,
-                                name=name, **unused_kwargs)
-
+def get_dense_decoder(output_shape: Union[int, Tuple[int, int, int]],  # output image shape [B, H, W]
+                      latent_size: int = 512,   # For dense models
+                      num_layers: int = 3,      # For dense models
+                      dense_normalization: str = 'none',
+                      disable_gated: bool = True,
+                      norm_first_layer: bool = True,
+                      norm_last_layer: bool = False,
+                      activation: str = 'relu',
+                      name: str = 'decoder',
+                      **unused_kwargs):
     # Handle dense model building separately since there are no size restrictions.
     # The returned decoder still needs the CTOR, eg: dec(input_size)
     net_map = {
@@ -3063,13 +3159,66 @@ def get_decoder(output_shape: Union[int, Tuple[int, int, int]],  # output image 
         },
     }
 
-    fn = net_map[decoder_layer_type][not disable_gated]
+    fn = net_map["dense"][not disable_gated]
     print("using {} {} for {}".format(
         "gated" if not disable_gated else "standard",
-        decoder_layer_type,
+        "dense",
         name
     ))
     return fn
+
+
+def get_decoder(output_shape: Union[int, Tuple[int, int, int]],  # output image shape [B, H, W]
+                decoder_layer_type: str = 'conv',
+                decoder_base_channels: int = 1024,      # For conv models
+                decoder_channel_multiplier: int = 0.5,  # Decoding shrinks channels
+                latent_size: int = 512,   # For dense models
+                num_layers: int = 3,      # For dense models
+                dense_normalization: str = 'none',
+                conv_normalization: str = 'none',
+                disable_gated: bool = True,
+                norm_first_layer: bool = True,
+                norm_last_layer: bool = False,
+                activation: str = 'relu',
+                name: str = 'decoder',
+                **unused_kwargs):
+    '''Helper to return the correct decoder.'''
+    if decoder_layer_type in ['conv', 'batch_conv', 'coordconv']:
+        return get_conv_decoder(output_shape=output_shape,
+                                decoder_layer_type=decoder_layer_type,
+                                decoder_base_channels=decoder_base_channels,
+                                decoder_channel_multiplier=decoder_channel_multiplier,
+                                latent_size=latent_size,
+                                dense_normalization=dense_normalization,
+                                conv_normalization=conv_normalization,
+                                disable_gated=disable_gated,
+                                norm_first_layer=norm_first_layer,
+                                norm_last_layer=norm_last_layer,
+                                activation=activation,
+                                name=name, **unused_kwargs)
+    elif decoder_layer_type == 'resnet':
+        return get_resnet_decoder(output_shape=output_shape,
+                                  decoder_base_channels=decoder_base_channels,
+                                  decoder_channel_multiplier=decoder_channel_multiplier,
+                                  dense_normalization=dense_normalization,
+                                  conv_normalization=conv_normalization,
+                                  disable_gated=disable_gated,
+                                  norm_first_layer=norm_first_layer,
+                                  norm_last_layer=norm_last_layer,
+                                  activation=activation,
+                                  name=name, **unused_kwargs)
+    elif decoder_layer_type == 'dense':
+        return get_dense_decoder(output_shape=output_shape,
+                                 latent_size=latent_size,
+                                 num_layers=num_layers,
+                                 dense_normalization=dense_normalization,
+                                 disable_gated=disable_gated,
+                                 norm_first_layer=norm_first_layer,
+                                 norm_last_layer=norm_last_layer,
+                                 activation=activation,
+                                 name=name, **unused_kwargs)
+    else:
+        raise ValueError("unknown decoder type requested: {}".format(decoder_layer_type))
 
 
 def get_polyak_prediction(model, pred_fn):
