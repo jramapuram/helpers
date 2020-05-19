@@ -1539,6 +1539,7 @@ def _build_resnet_stack(input_chans, output_chans,
                         normalization_str="none",
                         norm_first_layer=False,
                         norm_last_layer=False,
+                        block_type=BasicBlock,
                         **kwargs):
     """ Helper to build an arbitrary convolutional decoder.
 
@@ -1556,6 +1557,7 @@ def _build_resnet_stack(input_chans, output_chans,
     :param normalization_str: layer normalization type, eg: batchnorm
     :param norm_first_layer: apply normalization to the input layer?
     :param norm_last_layer: apply normalization to the final layer?
+    :param block_type: bottlneck or basic block
     :returns: a model with a bunch of conv layers.
     :rtype: nn.Sequential
 
@@ -1592,7 +1594,7 @@ def _build_resnet_stack(input_chans, output_chans,
         init_norm_i = norm_first_layer if idx == 0 else True
 
         # Construct the actual underlying layer
-        layer_i = BasicBlock(chan_in, chan_out,
+        layer_i = block_type(chan_in, chan_out,
                              resample=resample_fn_i,
                              layer_fn=layer_fn_i,
                              normalization_str=normalization_str,
@@ -1785,16 +1787,18 @@ class Conv32UpsampleDecoder(nn.Module):
 
 
 class VolumePreservingResnet(nn.Module):
-    def __init__(self, input_chans, base_channels=256, num_layers=3,
+    def __init__(self, input_chans, output_chans=None, base_channels=256, num_layers=3,
                  activation_str="relu", normalization_str="none",
                  norm_first_layer=False, norm_last_layer=False,
-                 layer_fn=nn.Conv2d):
+                 layer_fn=nn.Conv2d, block_type=BottleneckBlock):
+        """When output_chans is None it simply projects to output_chans."""
+
         super(VolumePreservingResnet, self).__init__()
         assert isinstance(input_chans, (float, int)), "Expect input_chans as float or int."
 
         # The encoding part of the model
         self.model = _build_resnet_stack(input_chans=input_chans,
-                                         output_chans=input_chans,
+                                         output_chans=input_chans if output_chans is None else output_chans,
                                          layer_fn=layer_fn,
                                          base_channels=base_channels,
                                          channel_multiplier=1.0,
@@ -1806,7 +1810,8 @@ class VolumePreservingResnet(nn.Module):
                                          activation_str=activation_str,
                                          normalization_str=normalization_str,
                                          norm_first_layer=norm_first_layer,
-                                         norm_last_layer=norm_last_layer)
+                                         norm_last_layer=norm_last_layer,
+                                         block_type=block_type)
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
@@ -1819,7 +1824,7 @@ class VolumePreservingResnet(nn.Module):
 class Resnet32Decoder(nn.Module):
     def __init__(self, input_size, output_chans, base_channels=1024, channel_multiplier=0.5,
                  activation_str="relu", conv_normalization_str="none", dense_normalization_str="none",
-                 norm_first_layer=True, norm_last_layer=False, layer_fn=nn.Conv2d):
+                 norm_first_layer=True, norm_last_layer=False, layer_fn=nn.Conv2d, block_type=BasicBlock):
         super(Resnet32Decoder, self).__init__()
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
         self.act = str_to_activ_module(activation_str)
@@ -1860,6 +1865,7 @@ class Resnet32Decoder(nn.Module):
                                          resample_fn=functools.partial(F.interpolate, scale_factor=2),
                                          activation_str=activation_str,
                                          normalization_str=conv_normalization_str,
+                                         block_type=block_type,
                                          norm_first_layer=False,  # Handled already
                                          norm_last_layer=True)    # We have a final conv
         self.final_conv = nn.Sequential(
@@ -1888,7 +1894,7 @@ class Resnet32Decoder(nn.Module):
 class Resnet64Decoder(nn.Module):
     def __init__(self, input_size, output_chans, base_channels=1024, channel_multiplier=0.5,
                  activation_str="relu", conv_normalization_str="none", dense_normalization_str="none",
-                 norm_first_layer=True, norm_last_layer=False, layer_fn=nn.Conv2d):
+                 norm_first_layer=True, norm_last_layer=False, layer_fn=nn.Conv2d, block_type=BasicBlock):
         super(Resnet64Decoder, self).__init__()
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
         self.act = str_to_activ_module(activation_str)
@@ -1929,6 +1935,7 @@ class Resnet64Decoder(nn.Module):
                                          resample_fn=functools.partial(F.interpolate, scale_factor=2),
                                          activation_str=activation_str,
                                          normalization_str=conv_normalization_str,
+                                         block_type=block_type,
                                          norm_first_layer=False,  # Handled already
                                          norm_last_layer=True)    # Final layer is below
         self.final_conv = nn.Sequential(
@@ -1957,7 +1964,7 @@ class Resnet64Decoder(nn.Module):
 class Resnet128Decoder(nn.Module):
     def __init__(self, input_size, output_chans, base_channels=1024, channel_multiplier=0.5,
                  activation_str="relu", conv_normalization_str="none", dense_normalization_str="none",
-                 norm_first_layer=True, norm_last_layer=False, layer_fn=nn.Conv2d):
+                 norm_first_layer=True, norm_last_layer=False, layer_fn=nn.Conv2d, block_type=BasicBlock):
         super(Resnet128Decoder, self).__init__()
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
         self.act = str_to_activ_module(activation_str)
@@ -1998,6 +2005,7 @@ class Resnet128Decoder(nn.Module):
                                          resample_fn=functools.partial(F.interpolate, scale_factor=2),
                                          activation_str=activation_str,
                                          normalization_str=conv_normalization_str,
+                                         block_type=block_type,
                                          norm_first_layer=False,  # Handled already
                                          norm_last_layer=True)    # Final conv below
         self.final_conv = nn.Sequential(
@@ -2142,7 +2150,7 @@ class Conv128Decoder(nn.Module):
 class Resnet128Encoder(nn.Module):
     def __init__(self, input_chans, output_size, base_channels=32, channel_multiplier=2,
                  activation_str="relu", normalization_str="none", norm_last_layer=False,
-                 layer_fn=nn.Conv2d):
+                 layer_fn=nn.Conv2d, block_type=BasicBlock):
         super(Resnet128Encoder, self).__init__()
         assert isinstance(input_chans, (float, int)), "Expect input_size as float or int."
         self.act = str_to_activ(activation_str)  # used for intermediary after resnet stack
@@ -2165,6 +2173,7 @@ class Resnet128Encoder(nn.Module):
                                          attentions=attentions,
                                          activation_str=activation_str,
                                          normalization_str=normalization_str,
+                                         block_type=block_type,
                                          norm_first_layer=False,  # raw data
                                          norm_last_layer=True)    # input to 1x1
 
@@ -2194,7 +2203,7 @@ class Resnet128Encoder(nn.Module):
 class Resnet64Encoder(nn.Module):
     def __init__(self, input_chans, output_size, base_channels=32, channel_multiplier=2,
                  activation_str="relu", normalization_str="none", norm_last_layer=False,
-                 layer_fn=nn.Conv2d):
+                 layer_fn=nn.Conv2d, block_type=BasicBlock):
         super(Resnet64Encoder, self).__init__()
         assert isinstance(input_chans, (float, int)), "Expect input_size as float or int."
         self.act = str_to_activ(activation_str)  # used for intermediary after resnet stack
@@ -2217,6 +2226,7 @@ class Resnet64Encoder(nn.Module):
                                          attentions=attentions,
                                          activation_str=activation_str,
                                          normalization_str=normalization_str,
+                                         block_type=block_type,
                                          norm_first_layer=False,  # raw data
                                          norm_last_layer=True)    # input to 1x1
 
@@ -2246,7 +2256,7 @@ class Resnet64Encoder(nn.Module):
 class Resnet32Encoder(nn.Module):
     def __init__(self, input_chans, output_size, base_channels=32, channel_multiplier=2,
                  activation_str="relu", normalization_str="none", norm_last_layer=False,
-                 layer_fn=nn.Conv2d):
+                 layer_fn=nn.Conv2d, block_type=BasicBlock):
         super(Resnet32Encoder, self).__init__()
         assert isinstance(input_chans, (float, int)), "Expect input_size as float or int."
         self.act = str_to_activ(activation_str)  # used for intermediary after resnet stack
@@ -2267,6 +2277,7 @@ class Resnet32Encoder(nn.Module):
                                          resample_fn=nn.AvgPool2d(2),
                                          activation_str=activation_str,
                                          normalization_str=normalization_str,
+                                         block_type=block_type,
                                          norm_first_layer=False,  # raw data
                                          norm_last_layer=True)    # input to 1x1
 
