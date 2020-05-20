@@ -14,6 +14,8 @@ from .utils import check_or_create_dir, same_type
 
 
 class View(nn.Module):
+    __constants__ = ['shape']
+
     def __init__(self, shape):
         super(View, self).__init__()
         self.shape = shape
@@ -1100,21 +1102,31 @@ class LinearWarmupWithCosineAnnealing(nn.Module):
         """Simple linear warmup given a step"""
         return float(step) / float(max(1.0, self.warmup_steps))
 
-    def forward(self, value_to_scale):
+    def forward(self, values_to_scale):
+        """Given a list of values to scale returns the KL annealing on ALL of them.
+
+        :param values_to_scale: a list of values to scale
+        :returns: list of scaled values
+        :rtype: list
+
+        """
+        if not isinstance(values_to_scale, (list, tuple)):
+            values_to_scale = [values_to_scale]
+
         if self.step >= self.total_steps - self.constant_for_last_k_steps:
             # Handle last K steps where we want it linear.
-            return value_to_scale
+            return values_to_scale
 
         if self.is_warming_up:
             # Handle the linear part
             lin_scalar = self.linear_rate[self.lin_idx]
             self.lin_idx = self.lin_idx + 1 if self.training else self.lin_idx
-            update = value_to_scale * lin_scalar
+            update = [v * lin_scalar for v in values_to_scale]
         else:
             # Handle the cosine part
             cos_scalar = self.cosine_rate[self.cos_idx]
             self.cos_idx = self.cos_idx + 1 if self.training else self.cos_idx
-            update = value_to_scale * cos_scalar
+            update = [v * cos_scalar for v in values_to_scale]
 
         # Reset the corresponding index if needed
         if self.is_warming_up and self.lin_idx == self.warmup_steps:
@@ -1162,14 +1174,24 @@ class LinearWarmupWithFixedInterval(nn.Module):
         """Simple linear warmup given a step"""
         return float(step) / float(max(1.0, self.warmup_steps))
 
-    def forward(self, value_to_scale):
+    def forward(self, values_to_scale):
+        """Given a list of values to scale returns the KL annealing on ALL of them.
+
+        :param values_to_scale: a list of values to scale
+        :returns: list of scaled values
+        :rtype: list
+
+        """
+        if not isinstance(values_to_scale, (list, tuple)):
+            values_to_scale = [values_to_scale]
+
         if self.is_warming_up:
             lin_scalar = self.linear_rate[self.lin_idx]
             self.lin_idx = self.lin_idx + 1 if self.training else self.lin_idx
-            update = value_to_scale * lin_scalar
+            update = [v * lin_scalar for v in values_to_scale]
         else:
             self.fixed_idx = self.fixed_idx + 1 if self.training else self.fixed_idx
-            update = value_to_scale
+            update = values_to_scale
 
         # Update whether we are warming up or not
         if self.is_warming_up and self.lin_idx == self.warmup_steps:
@@ -2372,6 +2394,10 @@ class TorchvisionEncoder(nn.Module):
         :rtype: torch.tensor
 
         """
+        assert images.dim() == 4, "require 4d [B, C, W, H] for torchvision encoder."
+        if images.shape[1] != 3:
+            images = torch.cat([images, images, images], 1)
+
         if self.required_input_shape is not None and (images.shape[-2] != self.required_input_shape[-2]
                                                       and images.shape[-1] != self.required_input_shape[-1]):
             images = F.interpolate(images, size=self.required_input_shape,
