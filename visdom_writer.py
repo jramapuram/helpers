@@ -1,6 +1,9 @@
 import gc
-import pickle
+# import sys
 import os
+import time
+import pickle
+import functools
 import numpy as np
 
 from tensorboardX.summary import compute_curve
@@ -8,8 +11,25 @@ from tensorboardX.utils import figure_to_image
 from tensorboardX.x2num import make_np
 
 
+def visdom_exception(function):
+    @functools.wraps(function)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return function(self, *args, **kwargs)
+        except:
+            # e = sys.exc_info()[0]
+            # print("Caught exception {} in function {}, reconnecting to visdom.".format(
+            #     e, function.__name__
+            # ))
+            self.vis = self._connect()
+            self._check_connect()
+            return function(self, *args, **kwargs)
+
+    return wrapper
+
+
 class VisdomWriter:
-    def __init__(self, env, server, port=8097, log_folder=None, use_incoming_socket=False, raise_exceptions=False):
+    def __init__(self, env, server, port=8097, log_folder=None, use_incoming_socket=False, raise_exceptions=True):
         self.env = env
         self.server = server
         self.port = port
@@ -38,6 +58,17 @@ class VisdomWriter:
                       use_incoming_socket=self.use_incoming_socket,
                       raise_exceptions=self.raise_exceptions)
 
+    def _check_connect(self):
+        startup_sec = 10
+        self.server_connected = self.vis.check_connection()
+        while not self.server_connected and startup_sec > 0:
+            time.sleep(0.1)
+            startup_sec -= 0.1
+            self.server_connected = self.vis.check_connection()
+
+        if self.server_connected is False:
+            print("No connection could be formed in 10 sec, this message might be dropped...")
+
     def reconnect_and_replay_log(self):
         """Creates a new visdom instance and replays the log-file if it exists."""
         if self.log_filename is not None and os.path.isfile(self.log_filename):
@@ -45,6 +76,7 @@ class VisdomWriter:
             vis = self._connect()
             vis.replay_log(self.log_filename)
 
+    @visdom_exception
     def add_scalar(self, tag, scalar_value, global_step=None):
         """Add scalar data to Visdom. Plots the values in a plot titled
            {main_tag}-{tag}.
@@ -88,7 +120,7 @@ class VisdomWriter:
                 },
             )
 
-        self.save()
+        # self.save()
 
     def add_scalars(self, main_tag, tag_scalar_dict, global_step=None):
         """Adds many scalar data to summary.
@@ -115,7 +147,7 @@ class VisdomWriter:
         for key in tag_scalar_dict.keys():
             self.add_scalar(key, tag_scalar_dict[key], global_step, main_tag)
 
-        self.save()
+        # self.save()
 
     def set_data(self, scalar_dict, window_dict):
         """ Helper to restore a scalar dict from disk
@@ -144,6 +176,7 @@ class VisdomWriter:
         with open(window_path, "wb") as f:
             pickle.dump(self.windows, f)
 
+    @visdom_exception
     def add_histogram(self, tag, values, global_step=None, bins='tensorflow'):
         """Add histogram to summary.
 
@@ -156,8 +189,9 @@ class VisdomWriter:
         """
         values = make_np(values)
         self.vis.histogram(make_np(values), opts={'title': tag})
-        self.save()
+        # self.save()
 
+    @visdom_exception
     def add_heatmap(self, tag, values, global_step=None):
         """Add histogram to summary.
 
@@ -170,8 +204,9 @@ class VisdomWriter:
         """
         values = make_np(values)
         self.vis.heatmap(make_np(values), opts={'title': tag})
-        self.save()
+        # self.save()
 
+    @visdom_exception
     def add_image(self, tag, img_tensor, global_step=None, caption=None):
         """Add image data to summary.
 
@@ -190,8 +225,9 @@ class VisdomWriter:
         store_history = 'reconstruction' in tag or 'generated' in tag if tag is not None else False
         fn(img_tensor, win=tag,
            opts={'title': tag, 'caption': caption, 'store_history': store_history})
-        self.save()
+        # self.save()
 
+    @visdom_exception
     def add_figure(self, tag, figure, global_step=None, close=True):
         """Render matplotlib figure into an image and add it to summary.
 
@@ -204,8 +240,9 @@ class VisdomWriter:
             close (bool): Flag to automatically close the figure
         """
         self.add_image(tag, figure_to_image(figure, close), global_step)
-        self.save()
+        # self.save()
 
+    @visdom_exception
     def add_video(self, tag, vid_tensor, global_step=None, fps=4):
         """Add video data to summary.
 
@@ -232,7 +269,7 @@ class VisdomWriter:
                     ind_vid = torch.from_numpy(vid_tensor[i, :, :, :, :]).permute(1, 2, 3, 0)
                 else:
                     ind_vid = vid_tensor[i, :, :, :, :].permute(1, 2, 3, 0)
-                scale_factor = 255 if np.any((ind_vid > 0) & (ind_vid < 1)) else 1
+                scale_factor = 255
                 # Visdom looks for .ndim attr, this is something raw Tensors don't have
                 # Cast to Numpy array to get .ndim attr
                 ind_vid = ind_vid.numpy()
@@ -243,8 +280,9 @@ class VisdomWriter:
         else:
             self.vis.video(tensor=vid_tensor, opts={'fps': fps})
 
-        self.save()
+        # self.save()
 
+    @visdom_exception
     def add_audio(self, tag, snd_tensor, global_step=None, sample_rate=44100):
         """Add audio data to summary.
 
@@ -259,8 +297,9 @@ class VisdomWriter:
         """
         snd_tensor = make_np(snd_tensor)
         self.vis.audio(tensor=snd_tensor, opts={'sample_frequency': sample_rate})
-        self.save()
+        # self.save()
 
+    @visdom_exception
     def add_text(self, tag, text_string, global_step=None, append=False):
         """Add text data to summary.
 
@@ -280,7 +319,7 @@ class VisdomWriter:
         else:
             self.vis.text(text_string, win=tag, append=append)
 
-        self.save()
+        # self.save()
 
     def add_graph_onnx(self, prototxt):
         # TODO: Visdom doesn't support graph visualization yet, so this is a no-op
@@ -295,6 +334,7 @@ class VisdomWriter:
         # TODO: Visdom doesn't support embeddings yet, so this is a no-op
         return
 
+    @visdom_exception
     def add_pr_curve(self, tag, labels, predictions, global_step=None, num_thresholds=127, weights=None):
         """Adds precision recall curve.
 
@@ -324,8 +364,9 @@ class VisdomWriter:
                 'ylabel': 'precision',
             },
         )
-        self.save()
+        # self.save()
 
+    @visdom_exception
     def add_pr_curve_raw(self, tag, true_positive_counts,
                          false_positive_counts,
                          true_negative_counts,
@@ -357,8 +398,9 @@ class VisdomWriter:
                 'ylabel': 'precision',
             },
         )
-        self.save()
+        # self.save()
 
+    @visdom_exception
     def save(self):
         self.vis.save([self.env])
 
