@@ -2,12 +2,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from torchvision import transforms
-from torch.autograd import Variable
-
 from .utils import to_data, float_type, int_type, \
-    num_samples_in_loader, zero_pad_smaller_cat, zeros_like
-from .msssim import MultiScaleSSIM
+    zero_pad_smaller_cat, zeros_like
+from pytorch_msssim import ms_ssim, ssim
 
 
 def topk(output, target, topk=(1,)):
@@ -60,37 +57,34 @@ def bce_accuracy(pred_logits, targets, size_average=True):
     return reduction_fn(pred.eq(targets).cpu().type(torch.FloatTensor))
 
 
-def calculate_mssim(reconstr_image, minibatch):
+def calculate_mssim(minibatch, reconstr_image):
     """ compute the ms-sim between an image and its reconstruction
 
-    :param reconstr_image: the reconstructed image
     :param minibatch: the input minibatch
-    :returns: a score
+    :param reconstr_image: the reconstructed image
+    :returns: the msssim score
     :rtype: float
 
     """
-    xform = transforms.ToPILImage()
-    reconstr_image_np = np.vstack([np.expand_dims(np.array(xform(ri)), 0) for ri in reconstr_image.detach().cpu()])
-    minibatch_np = np.vstack([np.expand_dims(np.array(xform(mi)), 0) for mi in minibatch.detach().cpu()])
-    reconstr_image_np = np.concatenate([np.expand_dims(reconstr_image_np, -1) for _ in range(3)], axis=-1) \
-        if len(reconstr_image_np.shape) == 3 else reconstr_image_np
-    minibatch_np = np.concatenate([np.expand_dims(minibatch_np, -1) for _ in range(3)], axis=-1) \
-        if len(minibatch_np.shape) == 3 else minibatch_np
-    return MultiScaleSSIM(reconstr_image_np, minibatch_np)
+    smallest_dim = min(minibatch.shape[-1], minibatch.shape[-2])
+    if smallest_dim < 160:  # Limitation of ms-ssim library due to 4x downsample
+        return 1 - ssim(X=minibatch, Y=reconstr_image, data_range=1, size_average=True, nonnegative_ssim=True)
+
+    return 1 - ms_ssim(X=minibatch, Y=reconstr_image, data_range=1, size_average=True)
 
 
 def calculate_consistency(model, loader, reparam_type, vae_type, cuda=False):
-    ''' \sum z_d(teacher) == z_d(student) for all test samples '''
+    ''' sum (z_d(teacher)) == z_d(student) for all test samples '''
     consistency = 0.0
 
     if model.current_model > 0 and (reparam_type == 'mixture'
                                     or reparam_type == 'discrete'):
-        model.eval() # prevents data augmentation
+        model.eval()  # prevents data augmentation
         consistency, samples_seen = [], 0
 
         for img, _ in loader.test_loader:
             with torch.no_grad():
-                img = Variable(img).cuda() if cuda else Variable(img)
+                img = img.cuda() if cuda else img
 
                 output_map = model(img)
                 if vae_type == 'parallel':
@@ -113,14 +107,13 @@ def calculate_consistency(model, loader, reparam_type, vae_type, cuda=False):
                     = zero_pad_smaller_cat(teacher_posterior, student_posterior)
 
                 correct = to_data(teacher_posterior).max(1)[1] \
-                          == to_data(student_posterior).max(1)[1]
+                    == to_data(student_posterior).max(1)[1]
                 consistency.append(torch.mean(correct.type(float_type(cuda))).item())
                 # print("teacher = ", teacher_posterior)
                 # print("student = ", student_posterior)
                 # print("consistency[-1]=", correct)
                 samples_seen += img.size(0)
 
-        num_test_samples = num_samples_in_loader(loader.test_loader)
         consistency = np.mean(consistency)
         print("Consistency [#samples: {}]: {}\n".format(samples_seen,
                                                         consistency))
@@ -128,21 +121,21 @@ def calculate_consistency(model, loader, reparam_type, vae_type, cuda=False):
 
 
 def estimate_fisher(model, data_loader, batch_size, sample_size=10000, cuda=False):
-    model.eval() # lock BN / dropout, etc
+    """Estimates the ELBO based FIM."""
+    model.eval()  # lock BN / dropout, etc
     diag_fisher = {k: zeros_like(param) for (k, param) in model.named_parameters()}
-    #num_samples_in_dataset = num_samples_in_loader(data_loader.train_loader)
     num_observed_samples = 0
 
-    for x, _ in data_loader.train_loader:
+    for x, _ in data_loader.train_loader:  # can't use torch.no_grad because we need grads.
         model.zero_grad()
-        x = Variable(x).cuda() if cuda else Variable(x)
+        x = x.cuda() if cuda else x
         reconstr_x, params = model(x)
         loss = model.loss_function(reconstr_x, x, params)
         for i in range(x.size(0)):
             model.zero_grad()
             loss['loss'][i].backward(retain_graph=True)
             for k, v in model.named_parameters():
-                diag_fisher[k] += v.grad.data ** 2 #/ num_samples_in_dataset
+                diag_fisher[k] += v.grad.data ** 2  # / num_samples_in_dataset
 
             num_observed_samples += 1
             if num_observed_samples > sample_size:

@@ -3,6 +3,8 @@ import torch
 import torch.nn.functional as F
 import torch.distributions as D
 
+from .metrics import calculate_mssim
+
 
 def nll_activation(logits, nll_type, **kwargs):
     """ Helper to activate logits based on the NLL
@@ -37,6 +39,8 @@ def nll_activation(logits, nll_type, **kwargs):
     elif nll_type == "bernoulli":
         return torch.sigmoid(logits)
     elif nll_type == "l2":
+        return logits
+    elif nll_type == "msssim":
         return logits
     else:
         raise Exception("unknown nll provided")
@@ -77,6 +81,7 @@ def nll_has_variance(nll_str):
         'laplace': True,
         'pixel_wise': False,
         'l2': False,
+        'msssim': False,
         'bernoulli': False,
         'log_logistic_256': True,
         'disc_mix_logistic': True
@@ -102,6 +107,7 @@ def nll(x, recon_x, nll_type):
         "laplace": nll_laplace,
         "pixel_wise": nll_pixel_wise,
         "l2": nll_l2,
+        "msssim": calculate_mssim,
         "log_logistic_256": nll_log_logistic_256,
     }
     return nll_map[nll_type](x.contiguous(), recon_x.contiguous())
