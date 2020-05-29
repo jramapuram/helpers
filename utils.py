@@ -1,6 +1,7 @@
 # coding: utf-8
 
 import os
+import git
 import socket
 import torch
 import torchvision
@@ -9,6 +10,7 @@ import numpy as np
 import contextlib
 import torch.nn.functional as F
 
+from pathlib import Path
 from itertools import chain
 from collections import Counter
 from copy import deepcopy
@@ -102,6 +104,53 @@ def num_samples_in_loader(data_loader):
         num_samples = len(data_loader.dataset)
 
     return num_samples
+
+
+def git_root_dir(path: str = '.'):
+    """Returns the path of the git root in path.
+
+    :param path: string path, anywhere in git root is fine.
+    :returns: str git root
+    :rtype: str
+
+    """
+    git_repo = git.Repo(path, search_parent_directories=True)
+    git_root = git_repo.git.rev_parse("--show-toplevel")
+    return git_root
+
+
+def read_files_from_dir_to_dict(source_dir: str, file_extensions=['*.py', '*.sh']):
+    """Reads all files from the source dir that match file_extensions and return a dict
+
+    :param source_dir: a string path
+    :param file_extensions: the extensions we want to save
+    :returns: a dict containing each file-path as key and value the bytes
+    :rtype: dict[str, bytes]
+
+    """
+    requested_files = flatten([Path(source_dir).rglob(f) for f in file_extensions])
+    cleaned_filenames = [str(filename.relative_to(Path(source_dir))) for filename in requested_files]
+    return {name: path.open(mode='r').read()
+            for name, path in zip(cleaned_filenames, requested_files)}
+
+
+def restore_files_from_dict_to_dir(source_dict, dest_dir: str, overwrite: bool = False):
+    """Restores data from the result of read_files_from_dir_to_dict into dest_dir
+
+    :param source_dict: the source
+    :param dest_dir: the destination directory
+    :param overwrite: (optional) overwrite existing files if they exist
+    :returns: nothing
+    :rtype: None
+
+    """
+    for k, v in source_dict.items():
+        new_file_path = Path(dest_dir) / Path(k)
+        new_file_path.parents[0].mkdir(parents=True, exist_ok=True)  # make the containing dir
+        if new_file_path.is_file() and overwrite is False:
+            raise Exception("File {} exists and overwrite=False specified".format(k))
+
+        new_file_path.open(mode='w').write(v)
 
 
 def append_to_csv(data, filename):
@@ -619,10 +668,10 @@ def get_name(args):
         return task_str
 
     # now filter into the final filter map and return
-    bool2int = lambda v: int(v) if isinstance(v, bool) else v
-    none2bool = lambda v: 0 if v is None else v
-    nonestr2bool = lambda v: 0 if isinstance(v, str) and v.lower().strip() == 'none' else v
-    clip2int = lambda v: int(v) if isinstance(v, float) and v - int(v) == 0 else v
+    def bool2int(v): return int(v) if isinstance(v, bool) else v
+    def none2bool(v): return 0 if v is None else v
+    def nonestr2bool(v): return 0 if isinstance(v, str) and v.lower().strip() == 'none' else v
+    def clip2int(v): return int(v) if isinstance(v, float) and v - int(v) == 0 else v
     filtered = {_factor(k): clip2int(nonestr2bool(none2bool(bool2int(v)))) for k, v in filtered.items()}
     filtered = {k: v for k, v in filtered.items() if v != 0}  # Removed 0-valued entries to save space
 
@@ -630,6 +679,7 @@ def get_name(args):
         args.uid if args.uid else "",
         "_".join(["{}{}".format(k, v) for k, v in filtered.items()])
     ).replace('groupnorm', 'gn')
+                           .replace('spectral_norm', 'sn')
                            .replace('class_conditioned', 'ccvae')
                            .replace('sync_batchnorm', 'sbn')
                            .replace('batchnorm', 'bn')

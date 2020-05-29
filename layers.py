@@ -10,7 +10,8 @@ from torchvision import models
 from typing import Tuple, Union
 from collections import OrderedDict
 
-from .utils import check_or_create_dir, same_type
+from .utils import check_or_create_dir, same_type, git_root_dir, \
+    read_files_from_dir_to_dict, restore_files_from_dict_to_dir
 
 
 class View(nn.Module):
@@ -3565,6 +3566,7 @@ def append_save_and_load_fns(model, optimizer, scheduler, grapher, args):
             torch.save(
                 {**{
                     'model': model.state_dict(),
+                    'code': read_files_from_dir_to_dict(git_root_dir()),
                     'optimizer': optimizer.state_dict(),
                     'scheduler': scheduler.state_dict(),
                     'args': args,
