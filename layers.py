@@ -1429,7 +1429,7 @@ class BottleneckBlock(nn.Module):
             self.init_norm = norm_fn(Identity(), nfeatures=in_channels, **gn_in_groups)
 
         self.conv1 = norm_fn(layer_fn(in_channels, out_channels // 2), **gn_half_groups)
-        self.act = str_to_activ_module(activation_str)
+        self.act = str_to_activ_module(activation_str)()
         self.conv2 = norm_fn(layer_fn(out_channels // 2, out_channels // 2), **gn_half_groups)
         self.conv3 = norm_fn(layer_fn(out_channels // 2, out_channels), nfeatures=out_channels, **gn_out_groups)
 
