@@ -38,9 +38,7 @@ def nll_activation(logits, nll_type, **kwargs):
         return torch.sigmoid(logits_mu)
     elif nll_type == "bernoulli":
         return torch.sigmoid(logits)
-    elif nll_type == "l2":
-        return logits
-    elif nll_type == "msssim":
+    elif nll_type in ["msssim", "l2", "l2msssim"]:
         return logits
     else:
         raise Exception("unknown nll provided")
@@ -83,6 +81,7 @@ def nll_has_variance(nll_str):
         'l2': False,
         'msssim': False,
         'bernoulli': False,
+        'l2msssim': False,
         'log_logistic_256': True,
         'disc_mix_logistic': True
     }
@@ -108,9 +107,27 @@ def nll(x, recon_x, nll_type):
         "pixel_wise": nll_pixel_wise,
         "l2": nll_l2,
         "msssim": calculate_mssim,
+        "l2msssim": nll_l2_msssim,
         "log_logistic_256": nll_log_logistic_256,
     }
     return nll_map[nll_type](x.contiguous(), recon_x.contiguous())
+
+
+def nll_l2_msssim(x, recon_x_logits):
+    """ Negative log-likelihood for bernoulli distribution.
+
+    :param x: input tensor
+    :param recon_x_logits: reconstruction logits
+    :returns: tensor of batch size for the NLL
+    :rtype: torch.Tensor
+
+    """
+    batch_size = x.size(0)
+    l2_nll = torch.sum(F.mse_loss(input=x.view(batch_size, -1),
+                                  target=recon_x_logits.view(batch_size, -1),
+                                  reduction='none'), dim=-1)
+    l2_msssim = calculate_mssim(x, recon_x_logits, size_average=False)
+    return l2_msssim * l2_nll
 
 
 def nll_bernoulli(x, recon_x_logits):

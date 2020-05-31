@@ -57,7 +57,7 @@ def bce_accuracy(pred_logits, targets, size_average=True):
     return reduction_fn(pred.eq(targets).cpu().type(torch.FloatTensor))
 
 
-def calculate_mssim(minibatch, reconstr_image):
+def calculate_mssim(minibatch, reconstr_image, size_average=True):
     """ compute the ms-sim between an image and its reconstruction
 
     :param minibatch: the input minibatch
@@ -67,10 +67,14 @@ def calculate_mssim(minibatch, reconstr_image):
 
     """
     smallest_dim = min(minibatch.shape[-1], minibatch.shape[-2])
-    if smallest_dim < 160:  # Limitation of ms-ssim library due to 4x downsample
-        return 1 - ssim(X=minibatch, Y=reconstr_image, data_range=1, size_average=True, nonnegative_ssim=True)
+    if minibatch.dtype != reconstr_image.dtype:
+        minibatch = minibatch.type(reconstr_image.dtype)
 
-    return 1 - ms_ssim(X=minibatch, Y=reconstr_image, data_range=1, size_average=True)
+    if smallest_dim < 160:  # Limitation of ms-ssim library due to 4x downsample
+        return 1 - ssim(X=minibatch, Y=reconstr_image, data_range=1,
+                        size_average=size_average, nonnegative_ssim=True)
+
+    return 1 - ms_ssim(X=minibatch, Y=reconstr_image, data_range=1, size_average=size_average)
 
 
 def calculate_consistency(model, loader, reparam_type, vae_type, cuda=False):
