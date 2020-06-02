@@ -11,7 +11,7 @@ from typing import Tuple, Union
 from collections import OrderedDict
 
 from .utils import check_or_create_dir, same_type, git_root_dir, \
-    read_files_from_dir_to_dict, restore_files_from_dict_to_dir
+    read_files_from_dir_to_dict
 
 
 class View(nn.Module):
@@ -2465,8 +2465,7 @@ class TorchvisionEncoder(nn.Module):
 
         # Compute the input image size; TODO(jramapuram): do we need this for non-pretrained?
         # Ideally the pooling layer should auto-magically handle this for us.
-        model_input_size = (299, 299) if layer_fn == models.inception_v3 else (224, 224)
-        self.required_input_shape = model_input_size if pretrained else None
+        self.required_input_shape = (299, 299) if layer_fn == models.inception_v3 else (224, 224)
 
         # Build the torchvision model and (optionally) load the pretained weights.
         self.model = nn.Sequential(
@@ -2491,11 +2490,11 @@ class TorchvisionEncoder(nn.Module):
                                norm_first_layer=self.norm_first_layer,
                                norm_last_layer=self.norm_last_layer)
 
-    def forward(self, images):
+    def forward(self, images, resize_to_pretrained=False):
         """Infers using the given torchvision model and projects with the FC.
 
         :param images: image tensor
-        :param required_input_shape: None or tuple of (w, h)
+        :param resize_to_pretrained: resize the minibatch to the shape required by pretrained model
         :returns: fc output logits
         :rtype: torch.tensor
 
@@ -2504,8 +2503,8 @@ class TorchvisionEncoder(nn.Module):
         if images.shape[1] != 3:
             images = torch.cat([images, images, images], 1)
 
-        if self.required_input_shape is not None and (images.shape[-2] != self.required_input_shape[-2]
-                                                      and images.shape[-1] != self.required_input_shape[-1]):
+        if resize_to_pretrained and (images.shape[-2] != self.required_input_shape[-2]
+                                     and images.shape[-1] != self.required_input_shape[-1]):
             images = F.interpolate(images, size=self.required_input_shape,
                                    mode='bilinear', align_corners=True)
 
