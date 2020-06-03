@@ -10,6 +10,7 @@ from torchvision import models
 from typing import Tuple, Union
 from collections import OrderedDict
 
+from .s3d import S3D
 from .tsm_resnet import build_tsm_resnet
 from .utils import check_or_create_dir, same_type, git_root_dir, \
     read_files_from_dir_to_dict
@@ -2435,6 +2436,7 @@ class Resnet32Encoder(nn.Module):
 
 class TSMResnetEncoder(nn.Module):
     """Wraps torchvision resnet model such as Resnet50 with TSM."""
+
     def __init__(self, pretrained_output_size, output_size, latent_size=512, activation_str="relu",
                  conv_normalization_str="none", dense_normalization_str="none",
                  norm_first_layer=False, norm_last_layer=False,
@@ -2495,7 +2497,7 @@ class TSMResnetEncoder(nn.Module):
                                norm_last_layer=self.norm_last_layer)
 
     def forward(self, images, reduction='none', resize_to_pretrained=False):
-        """Infers using the given torchvision model and projects with the FC.
+        """Infers using the given torchvision resnet w/ TSM and projects with the FC.
 
         :param images: image tensor
         :param reduction: reduce over the num_segment dimension
@@ -2537,8 +2539,72 @@ class TSMResnetEncoder(nn.Module):
         return base_out.squeeze(1)
 
 
+class S3DEncoder(nn.Module):
+    """Builds an S3D encoder with an FC layer."""
+
+    def __init__(self, output_size, latent_size=512, activation_str="relu",
+                 conv_normalization_str="none", dense_normalization_str="none",
+                 norm_first_layer=False, norm_last_layer=False,
+                 pretrained=False, **unused_args):
+        """Returns an S3D video encoder.
+
+        :param output_size: output size for FC projection
+        :param latent_size: latent size for FC projection
+        :param activation_str: activation for FC layers
+        :param conv_normalization_str: NOTE: ONLY used to convert BN --> SyncBN
+        :param dense_normalization_str: dense projection layer normalization
+        :param norm_first_layer: norm input to FC (output of base model)
+        :param norm_last_layer: norm output of FC
+        :param pretrained: pull pretrained S3D on HowTo100M
+        :returns: module with FC attached
+        :rtype: nn.Module
+
+        """
+        super(S3DEncoder, self).__init__()
+        self.output_size = output_size
+        self.latent_size = latent_size
+        self.norm_first_layer = norm_first_layer
+        self.norm_last_layer = norm_last_layer
+        self.activation_str = activation_str
+
+        # Build the backend encoder, but don't specify classes
+        # s.t. the pretrained state_dict can be properly loaded.
+        # We will be using our own FC below anyhow.
+        self.model = S3D(pretrained=pretrained)
+
+        if conv_normalization_str == 'sync_batchnorm':
+            self.model = nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
+
+        # Dense FC layer
+        self.fc = _build_dense(input_size=1024,  # S3D embedding size
+                               output_size=self.output_size,
+                               latent_size=self.latent_size,
+                               num_layers=2,  # XXX(jramapuram): hardcoded for now
+                               layer_fn=nn.Linear,
+                               activation_str=self.activation_str,
+                               normalization_str=dense_normalization_str,
+                               norm_first_layer=self.norm_first_layer,
+                               norm_last_layer=self.norm_last_layer)
+
+    def forward(self, images):
+        """Returns S3D embeddings projected through an FC layer
+
+        :param images: image tensor
+        :returns: fc output logits
+        :rtype: torch.tensor
+
+        """
+        assert images.dim() == 5, "require 5d [B, T, C, W, H] inputs for TSM Resnet."
+        if images.shape[2] == 1:  # convert to 3-channels if needed.
+            images = torch.cat([images, images, images], 2)
+
+        base_out = self.model(images)    # get the base model outputs
+        return self.fc(base_out.squeeze())
+
+
 class TorchvisionEncoder(nn.Module):
     """Wraps torchvision models such as Resnet50, etc."""
+
     def __init__(self, pretrained_output_size, output_size, latent_size=512, activation_str="relu",
                  conv_normalization_str="none", dense_normalization_str="none",
                  norm_first_layer=False, norm_last_layer=False,
@@ -2899,6 +2965,14 @@ def get_torchvision_encoder(encoder_layer_type: str = 'conv',
                             name: str = 'encoder',
                             **unused_kwargs):
     net_map = {
+        's3d': functools.partial(S3DEncoder,
+                                 latent_size=latent_size,
+                                 activation_str=activation,
+                                 conv_normalization_str=conv_normalization,
+                                 dense_normalization_str=dense_normalization,
+                                 norm_first_layer=norm_first_layer,
+                                 norm_last_layer=norm_last_layer,
+                                 pretrained=pretrained),
         'tsm_resnet50': functools.partial(TSMResnetEncoder,
                                           pretrained_output_size=2048,  # r50 avg-pool size
                                           latent_size=latent_size,
@@ -3195,7 +3269,7 @@ def get_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W]
     '''Helper to return the correct encoder function.'''
     if encoder_layer_type in ['resnext50_32x4d', 'resnet50', 'resnet34', 'resnet18',
                               'shufflenet_v2_x0_5', 'mobilenet_v2', 'densenet121',
-                              'tsm_resnet18', 'tsm_resnet34', 'tsm_resnet50']:
+                              'tsm_resnet18', 'tsm_resnet34', 'tsm_resnet50', 's3d']:
         return get_torchvision_encoder(encoder_layer_type=encoder_layer_type,
                                        latent_size=latent_size,
                                        dense_normalization=dense_normalization,
