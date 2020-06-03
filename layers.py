@@ -10,6 +10,7 @@ from torchvision import models
 from typing import Tuple, Union
 from collections import OrderedDict
 
+from .tsm_resnet import build_tsm_resnet
 from .utils import check_or_create_dir, same_type, git_root_dir, \
     read_files_from_dir_to_dict
 
@@ -2432,6 +2433,110 @@ class Resnet32Encoder(nn.Module):
         return outputs
 
 
+class TSMResnetEncoder(nn.Module):
+    """Wraps torchvision resnet model such as Resnet50 with TSM."""
+    def __init__(self, pretrained_output_size, output_size, latent_size=512, activation_str="relu",
+                 conv_normalization_str="none", dense_normalization_str="none",
+                 norm_first_layer=False, norm_last_layer=False,
+                 layer_fn=models.resnet50, pretrained=False,
+                 num_segments=1, shift_div=8, temporal_pool=False,                  # TSM related.
+                 **unused_args):
+        """Wrap a torchvision resnet such as resnet50 with TSM.
+
+        :param pretrained_output_size: output size of the pretrained model
+        :param output_size: output size for FC projection
+        :param latent_size: latent size for FC projection
+        :param activation_str: activation for FC layers
+        :param num_segments: number of video segments to use for TSM
+        :param shift_div: shift count for TSM
+        :param temporal_pool: use temporal pooling with TSM
+        :param conv_normalization_str: NOTE: ONLY used to convert BN --> SyncBN
+        :param dense_normalization_str: dense projection layer normalization
+        :param norm_first_layer: norm input to FC (output of base model)
+        :param norm_last_layer: norm output of FC
+        :param layer_fn: layer fn for FC
+        :param pretrained: pull pretrained classifier weights for torchvision model
+        :returns: module with FC attached
+        :rtype: nn.Module
+
+        """
+        super(TSMResnetEncoder, self).__init__()
+        self.output_size = output_size
+        self.latent_size = latent_size
+        self.norm_first_layer = norm_first_layer
+        self.norm_last_layer = norm_last_layer
+        self.activation_str = activation_str
+
+        # tsm params
+        self.temporal_pool = temporal_pool
+        self.num_segments = num_segments
+
+        # Build the TSM stack
+        tsm_resnet = build_tsm_resnet(layer_fn=layer_fn,
+                                      num_segments=num_segments,
+                                      shift_div=shift_div,
+                                      temporal_pool=temporal_pool,
+                                      pretrained=pretrained)
+        self.model = nn.Sequential(
+            *list(tsm_resnet.children())[:-1]
+        )
+        if conv_normalization_str == 'sync_batchnorm':
+            self.model = nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
+
+        # Dense FC layer
+        self.fc = _build_dense(input_size=pretrained_output_size,
+                               output_size=self.output_size,
+                               latent_size=self.latent_size,
+                               num_layers=2,  # XXX(jramapuram): hardcoded for now
+                               layer_fn=nn.Linear,
+                               activation_str=self.activation_str,
+                               normalization_str=dense_normalization_str,
+                               norm_first_layer=self.norm_first_layer,
+                               norm_last_layer=self.norm_last_layer)
+
+    def forward(self, images, reduction='none', resize_to_pretrained=False):
+        """Infers using the given torchvision model and projects with the FC.
+
+        :param images: image tensor
+        :param reduction: reduce over the num_segment dimension
+        :param resize_to_pretrained: resize the minibatch to the shape required by pretrained model
+        :returns: fc output logits
+        :rtype: torch.tensor
+
+        """
+        assert images.dim() == 5, "require 5d [B, T, C, W, H] inputs for TSM Resnet."
+        input_shape = images.shape
+        if images.shape[2] == 1:  # convert to 3-channels if needed.
+            images = torch.cat([images, images, images], 2)
+
+        # Fold batch into time for TSM-resnet
+        images = images.view((-1, *input_shape[-3:]))
+
+        # resize images for pretrained model if requested
+        if resize_to_pretrained and (images.shape[-2] != self.required_input_shape[-2]
+                                     and images.shape[-1] != self.required_input_shape[-1]):
+            images = F.interpolate(images, size=self.required_input_shape,
+                                   mode='bilinear', align_corners=True)
+
+        base_out = self.model(images)    # get the base model outputs
+        base_out = self.fc(base_out.squeeze())
+
+        # With videos we normally work with segments, if temporally pooling
+        # we want to reshape appropriately, otherwise simply
+        if self.temporal_pool:
+            base_out = base_out.view((-1, self.num_segments // 2) + base_out.size()[1:])
+        else:
+            base_out = base_out.view((-1, self.num_segments) + base_out.size()[1:])
+
+        # If we are softmax-ing it is actually better to get the mean AFTER softmax
+        if reduction == 'mean':
+            return torch.mean(base_out, 1)  # , keepdim=True)
+        elif reduction == 'average':
+            return torch.sum(base_out, 1)   # , keepdim=True)
+
+        return base_out.squeeze(1)
+
+
 class TorchvisionEncoder(nn.Module):
     """Wraps torchvision models such as Resnet50, etc."""
     def __init__(self, pretrained_output_size, output_size, latent_size=512, activation_str="relu",
@@ -2794,100 +2899,116 @@ def get_torchvision_encoder(encoder_layer_type: str = 'conv',
                             name: str = 'encoder',
                             **unused_kwargs):
     net_map = {
-        'resnext50_32x4d': {
-            False: functools.partial(TorchvisionEncoder,
-                                     pretrained_output_size=2048,  # rx50-x4 avg-pool size
-                                     latent_size=latent_size,
-                                     activation_str=activation,
-                                     conv_normalization_str=conv_normalization,
-                                     dense_normalization_str=dense_normalization,
-                                     norm_first_layer=norm_first_layer,
-                                     norm_last_layer=norm_last_layer,
-                                     pretrained=pretrained,
-                                     freeze_base=freeze_base,
-                                     layer_fn=models.resnext50_32x4d),
-        },
-        'resnet50': {
-            False: functools.partial(TorchvisionEncoder,
-                                     pretrained_output_size=2048,  # r50 avg-pool size
-                                     latent_size=latent_size,
-                                     activation_str=activation,
-                                     conv_normalization_str=conv_normalization,
-                                     dense_normalization_str=dense_normalization,
-                                     norm_first_layer=norm_first_layer,
-                                     norm_last_layer=norm_last_layer,
-                                     pretrained=pretrained,
-                                     freeze_base=freeze_base,
-                                     layer_fn=models.resnet50),
-        },
-        'resnet34': {
-            False: functools.partial(TorchvisionEncoder,
-                                     pretrained_output_size=512,  # r34 avg-pool size
-                                     latent_size=latent_size,
-                                     activation_str=activation,
-                                     conv_normalization_str=conv_normalization,
-                                     dense_normalization_str=dense_normalization,
-                                     norm_first_layer=norm_first_layer,
-                                     norm_last_layer=norm_last_layer,
-                                     pretrained=pretrained,
-                                     freeze_base=freeze_base,
-                                     layer_fn=models.resnet34),
-        },
-        'resnet18': {
-            False: functools.partial(TorchvisionEncoder,
-                                     pretrained_output_size=512,  # r18 avg-pool size
-                                     latent_size=latent_size,
-                                     activation_str=activation,
-                                     conv_normalization_str=conv_normalization,
-                                     dense_normalization_str=dense_normalization,
-                                     norm_first_layer=norm_first_layer,
-                                     norm_last_layer=norm_last_layer,
-                                     pretrained=pretrained,
-                                     freeze_base=freeze_base,
-                                     layer_fn=models.resnet18),
-        },
-        'shufflenet_v2_x0_5': {
-            False: functools.partial(TorchvisionEncoder,
-                                     pretrained_output_size=1024,  # r34 avg-pool size
-                                     latent_size=latent_size,
-                                     activation_str=activation,
-                                     conv_normalization_str=conv_normalization,
-                                     dense_normalization_str=dense_normalization,
-                                     norm_first_layer=norm_first_layer,
-                                     norm_last_layer=norm_last_layer,
-                                     pretrained=pretrained,
-                                     freeze_base=freeze_base,
-                                     layer_fn=models.shufflenet_v2_x0_5),
-        },
-        'mobilenet_v2': {
-            False: functools.partial(TorchvisionEncoder,
-                                     pretrained_output_size=1280,  # mobilenet_v2 pool size
-                                     latent_size=latent_size,
-                                     activation_str=activation,
-                                     conv_normalization_str=conv_normalization,
-                                     dense_normalization_str=dense_normalization,
-                                     norm_first_layer=norm_first_layer,
-                                     norm_last_layer=norm_last_layer,
-                                     pretrained=pretrained,
-                                     freeze_base=freeze_base,
-                                     layer_fn=models.mobilenet_v2),
-        },
-        'densenet121': {
-            False: functools.partial(TorchvisionEncoder,
-                                     pretrained_output_size=1024,  # densenet pool size
-                                     latent_size=latent_size,
-                                     activation_str=activation,
-                                     conv_normalization_str=conv_normalization,
-                                     dense_normalization_str=dense_normalization,
-                                     norm_first_layer=norm_first_layer,
-                                     norm_last_layer=norm_last_layer,
-                                     pretrained=pretrained,
-                                     freeze_base=freeze_base,
-                                     layer_fn=models.densenet121),
-        },
+        'tsm_resnet50': functools.partial(TSMResnetEncoder,
+                                          pretrained_output_size=2048,  # r50 avg-pool size
+                                          latent_size=latent_size,
+                                          activation_str=activation,
+                                          conv_normalization_str=conv_normalization,
+                                          dense_normalization_str=dense_normalization,
+                                          norm_first_layer=norm_first_layer,
+                                          norm_last_layer=norm_last_layer,
+                                          pretrained=pretrained,
+                                          layer_fn=models.resnet50),
+        'tsm_resnet34': functools.partial(TSMResnetEncoder,
+                                          pretrained_output_size=512,  # r34 avg-pool size
+                                          latent_size=latent_size,
+                                          activation_str=activation,
+                                          conv_normalization_str=conv_normalization,
+                                          dense_normalization_str=dense_normalization,
+                                          norm_first_layer=norm_first_layer,
+                                          norm_last_layer=norm_last_layer,
+                                          pretrained=pretrained,
+                                          layer_fn=models.resnet34),
+        'tsm_resnet18': functools.partial(TSMResnetEncoder,
+                                          pretrained_output_size=512,  # r18 avg-pool size
+                                          latent_size=latent_size,
+                                          activation_str=activation,
+                                          conv_normalization_str=conv_normalization,
+                                          dense_normalization_str=dense_normalization,
+                                          norm_first_layer=norm_first_layer,
+                                          norm_last_layer=norm_last_layer,
+                                          pretrained=pretrained,
+                                          layer_fn=models.resnet18),
+        'resnext50_32x4d': functools.partial(TorchvisionEncoder,
+                                             pretrained_output_size=2048,  # rx50-x4 avg-pool size
+                                             latent_size=latent_size,
+                                             activation_str=activation,
+                                             conv_normalization_str=conv_normalization,
+                                             dense_normalization_str=dense_normalization,
+                                             norm_first_layer=norm_first_layer,
+                                             norm_last_layer=norm_last_layer,
+                                             pretrained=pretrained,
+                                             freeze_base=freeze_base,
+                                             layer_fn=models.resnext50_32x4d),
+        'resnet50': functools.partial(TorchvisionEncoder,
+                                      pretrained_output_size=2048,  # r50 avg-pool size
+                                      latent_size=latent_size,
+                                      activation_str=activation,
+                                      conv_normalization_str=conv_normalization,
+                                      dense_normalization_str=dense_normalization,
+                                      norm_first_layer=norm_first_layer,
+                                      norm_last_layer=norm_last_layer,
+                                      pretrained=pretrained,
+                                      freeze_base=freeze_base,
+                                      layer_fn=models.resnet50),
+        'resnet34': functools.partial(TorchvisionEncoder,
+                                      pretrained_output_size=512,  # r34 avg-pool size
+                                      latent_size=latent_size,
+                                      activation_str=activation,
+                                      conv_normalization_str=conv_normalization,
+                                      dense_normalization_str=dense_normalization,
+                                      norm_first_layer=norm_first_layer,
+                                      norm_last_layer=norm_last_layer,
+                                      pretrained=pretrained,
+                                      freeze_base=freeze_base,
+                                      layer_fn=models.resnet34),
+        'resnet18': functools.partial(TorchvisionEncoder,
+                                      pretrained_output_size=512,  # r18 avg-pool size
+                                      latent_size=latent_size,
+                                      activation_str=activation,
+                                      conv_normalization_str=conv_normalization,
+                                      dense_normalization_str=dense_normalization,
+                                      norm_first_layer=norm_first_layer,
+                                      norm_last_layer=norm_last_layer,
+                                      pretrained=pretrained,
+                                      freeze_base=freeze_base,
+                                      layer_fn=models.resnet18),
+        'shufflenet_v2_x0_5': functools.partial(TorchvisionEncoder,
+                                                pretrained_output_size=1024,  # r34 avg-pool size
+                                                latent_size=latent_size,
+                                                activation_str=activation,
+                                                conv_normalization_str=conv_normalization,
+                                                dense_normalization_str=dense_normalization,
+                                                norm_first_layer=norm_first_layer,
+                                                norm_last_layer=norm_last_layer,
+                                                pretrained=pretrained,
+                                                freeze_base=freeze_base,
+                                                layer_fn=models.shufflenet_v2_x0_5),
+        'mobilenet_v2': functools.partial(TorchvisionEncoder,
+                                          pretrained_output_size=1280,  # mobilenet_v2 pool size
+                                          latent_size=latent_size,
+                                          activation_str=activation,
+                                          conv_normalization_str=conv_normalization,
+                                          dense_normalization_str=dense_normalization,
+                                          norm_first_layer=norm_first_layer,
+                                          norm_last_layer=norm_last_layer,
+                                          pretrained=pretrained,
+                                          freeze_base=freeze_base,
+                                          layer_fn=models.mobilenet_v2),
+        'densenet121': functools.partial(TorchvisionEncoder,
+                                         pretrained_output_size=1024,  # densenet pool size
+                                         latent_size=latent_size,
+                                         activation_str=activation,
+                                         conv_normalization_str=conv_normalization,
+                                         dense_normalization_str=dense_normalization,
+                                         norm_first_layer=norm_first_layer,
+                                         norm_last_layer=norm_last_layer,
+                                         pretrained=pretrained,
+                                         freeze_base=freeze_base,
+                                         layer_fn=models.densenet121),
     }
 
-    fn = net_map[encoder_layer_type][False]
+    fn = net_map[encoder_layer_type]
     print("using {} for {}".format(
         encoder_layer_type,
         name
@@ -3073,7 +3194,8 @@ def get_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W]
                 **unused_kwargs):
     '''Helper to return the correct encoder function.'''
     if encoder_layer_type in ['resnext50_32x4d', 'resnet50', 'resnet34', 'resnet18',
-                              'shufflenet_v2_x0_5', 'mobilenet_v2', 'densenet121']:
+                              'shufflenet_v2_x0_5', 'mobilenet_v2', 'densenet121',
+                              'tsm_resnet18', 'tsm_resnet34', 'tsm_resnet50']:
         return get_torchvision_encoder(encoder_layer_type=encoder_layer_type,
                                        latent_size=latent_size,
                                        dense_normalization=dense_normalization,
