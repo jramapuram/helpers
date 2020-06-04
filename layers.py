@@ -2491,7 +2491,7 @@ class TSMResnetEncoder(nn.Module):
                                latent_size=self.latent_size,
                                num_layers=2,  # XXX(jramapuram): hardcoded for now
                                layer_fn=nn.Linear,
-                               activation_str=self.activation_str,
+                               activation_str=activation_str if 'evonorm' not in conv_normalization_str else 'relu',
                                normalization_str=dense_normalization_str,
                                norm_first_layer=self.norm_first_layer,
                                norm_last_layer=self.norm_last_layer)
@@ -2581,7 +2581,7 @@ class S3DEncoder(nn.Module):
                                latent_size=self.latent_size,
                                num_layers=2,  # XXX(jramapuram): hardcoded for now
                                layer_fn=nn.Linear,
-                               activation_str=self.activation_str,
+                               activation_str=activation_str if 'evonorm' not in conv_normalization_str else 'relu',
                                normalization_str=dense_normalization_str,
                                norm_first_layer=self.norm_first_layer,
                                norm_last_layer=self.norm_last_layer)
@@ -2656,7 +2656,7 @@ class TorchvisionEncoder(nn.Module):
                                latent_size=self.latent_size,
                                num_layers=2,  # XXX(jramapuram): hardcoded for now
                                layer_fn=nn.Linear,
-                               activation_str=self.activation_str,
+                               activation_str=activation_str if 'evonorm' not in conv_normalization_str else 'relu',
                                normalization_str=dense_normalization_str,
                                norm_first_layer=self.norm_first_layer,
                                norm_last_layer=self.norm_last_layer)
@@ -3258,7 +3258,7 @@ def get_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W]
                 num_layers: int = 3,               # For dense models only
                 dense_normalization: str = 'none',
                 conv_normalization: str = 'none',
-                layer_modifier: str = 'none',            # 'gated', 'spectral_norm' or 'coordconv'
+                layer_modifier: str = 'none',      # 'gated', 'spectral_norm' or 'coordconv'
                 norm_first_layer: bool = False,
                 norm_last_layer: bool = False,
                 activation: str = 'relu',
