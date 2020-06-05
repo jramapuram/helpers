@@ -27,6 +27,17 @@ class View(nn.Module):
         return input.contiguous().view(*self.shape)
 
 
+class Permute(nn.Module):
+    __constants__ = ['dims']
+
+    def __init__(self, dims):
+        super(Permute, self).__init__()
+        self.dims = dims
+
+    def forward(self, input):
+        return input.permute(self.dims).contiguous()
+
+
 class Squeeze(nn.Module):
     def __init__(self):
         super(Squeeze, self).__init__()
@@ -2507,11 +2518,11 @@ class TSMResnetEncoder(nn.Module):
 
         """
         assert images.dim() == 5, "require 5d [B, T, C, W, H] inputs for TSM Resnet."
-        input_shape = images.shape
         if images.shape[2] == 1:  # convert to 3-channels if needed.
             images = torch.cat([images, images, images], 2)
 
         # Fold batch into time for TSM-resnet
+        input_shape = images.shape
         images = images.view((-1, *input_shape[-3:]))
 
         # resize images for pretrained model if requested
