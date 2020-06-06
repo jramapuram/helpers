@@ -2581,7 +2581,7 @@ class S3DEncoder(nn.Module):
         # Build the backend encoder, but don't specify classes
         # s.t. the pretrained state_dict can be properly loaded.
         # We will be using our own FC below anyhow.
-        self.model = S3D(pretrained=pretrained)
+        self.model = S3D(pretrained=pretrained, space_to_depth=True)
 
         if conv_normalization_str == 'sync_batchnorm':
             self.model = nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
@@ -2597,7 +2597,7 @@ class S3DEncoder(nn.Module):
                                norm_first_layer=self.norm_first_layer,
                                norm_last_layer=self.norm_last_layer)
 
-    def forward(self, images):
+    def forward(self, images, reduction='none'):
         """Returns S3D embeddings projected through an FC layer
 
         :param images: image tensor
@@ -2609,8 +2609,17 @@ class S3DEncoder(nn.Module):
         if images.shape[2] == 1:  # convert to 3-channels if needed.
             images = torch.cat([images, images, images], 2)
 
-        base_out = self.model(images)    # get the base model outputs
-        return self.fc(base_out.squeeze())
+        base_out = self.model(images)              # get the base model outputs
+        base_out = torch.mean(base_out, (-1, -2))  # reduce over feature dimensions
+
+        # Pool over temporal dimension
+        if reduction == 'mean':
+            base_out = torch.mean(base_out, 1)  # , keepdim=True)
+        elif reduction == 'average':
+            base_out = torch.sum(base_out, 1)   # , keepdim=True)
+
+        base_out = self.fc(base_out)
+        return base_out.squeeze(1)
 
 
 class TorchvisionEncoder(nn.Module):

@@ -339,6 +339,7 @@ class S3D(nn.Module):
         net = self.conv_2c(net)
         if self.gating:
             net = self.gating(net)
+
         net = self.maxpool_3a(net)
         net = self.mixed_3b(net)
         net = self.mixed_3c(net)
@@ -351,5 +352,6 @@ class S3D(nn.Module):
         net = self.maxpool_5a(net)
         net = self.mixed_5b(net)
         net = self.mixed_5c(net)
-        net = th.mean(net, dim=[2, 3, 4])
+        # net = th.mean(net, dim=[2, 3, 4])
+        net = net.permute(0, 2, 1, 3, 4)
         return net
