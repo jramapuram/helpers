@@ -3745,7 +3745,7 @@ def append_save_and_load_fns(model, optimizer, scheduler, grapher, args):
 
         return save_dict
 
-    def save(model, optimizer, scheduler, grapher, **kwargs):
+    def save(model, optimizer, scheduler, grapher, code, **kwargs):
         """ Saves a model and optimizer (w/scheduler) to a file.
 
             Optional params:
@@ -3756,6 +3756,7 @@ def append_save_and_load_fns(model, optimizer, scheduler, grapher, args):
         :param model: nn.Module
         :param optimizer: nn.Optim
         :param scheduler: optim.lr_scheduler
+        :param code: a dict containing all the code for this git repo
         :returns: None
         :rtype: None
 
@@ -3781,7 +3782,7 @@ def append_save_and_load_fns(model, optimizer, scheduler, grapher, args):
             torch.save(
                 {**{
                     'model': model.state_dict(),
-                    'code': read_files_from_dir_to_dict(git_root_dir()),
+                    'code': code,
                     'optimizer': optimizer.state_dict(),
                     'scheduler': scheduler.state_dict(),
                     'args': args,
@@ -3791,6 +3792,8 @@ def append_save_and_load_fns(model, optimizer, scheduler, grapher, args):
             )
 
     grapher = None if args.visdom_url is None else grapher  # nothing to save for tensorboard.
+    code = read_files_from_dir_to_dict(git_root_dir())
     model.load = functools.partial(load, model=model, grapher=grapher, optimizer=optimizer, scheduler=scheduler)
-    model.save = functools.partial(save, model=model, grapher=grapher, optimizer=optimizer, scheduler=scheduler)
+    model.save = functools.partial(save, model=model, grapher=grapher, optimizer=optimizer,
+                                   scheduler=scheduler, code=code)
     return model
