@@ -66,6 +66,13 @@ def calculate_mssim(minibatch, reconstr_image, size_average=True):
     :rtype: float
 
     """
+    if minibatch.dim() == 5 and reconstr_image.dim() == 5:  # special case where we have temporal dim
+        msssim = torch.cat([calculate_mssim(minibatch[:, i, ::],
+                                            reconstr_image[:, i, ::],
+                                            size_average=size_average).unsqueeze(-1)
+                            for i in range(minibatch.shape[1])], -1)
+        return torch.mean(msssim, -1)
+
     smallest_dim = min(minibatch.shape[-1], minibatch.shape[-2])
     if minibatch.dtype != reconstr_image.dtype:
         minibatch = minibatch.type(reconstr_image.dtype)
