@@ -364,7 +364,7 @@ class VisdomWriter:
 
     def close(self):
         """Closes the connection, but replays the entire log first if it exists."""
-        self.reconnect_and_replay_log()
+        # self.reconnect_and_replay_log()  # TODO(jramapuram): disabled for now due to quick OOM-ing.
 
         if hasattr(self, 'vis'):
             del self.vis
