@@ -2586,11 +2586,13 @@ class TSMResnetEncoder(nn.Module):
 
         # If we are softmax-ing it is actually better to get the mean AFTER softmax
         if reduction == 'mean':
-            return torch.mean(base_out, 1)  # , keepdim=True)
+            base_out = torch.mean(base_out, 1)
+            return base_out.view(input_shape[0], -1, base_out.shape[-1]).squeeze(1)
         elif reduction == 'average':
-            return torch.sum(base_out, 1)   # , keepdim=True)
+            base_out = torch.sum(base_out, 1)
+            return base_out.view(input_shape[0], -1, base_out.shape[-1]).squeeze(1)
 
-        return base_out.squeeze(1)
+        return base_out.squeeze(1).view(input_shape[0], input_shape[1], -1)
 
 
 class S3DEncoder(nn.Module):

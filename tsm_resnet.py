@@ -1,4 +1,4 @@
-# Sourced and licensed from: https://bit.ly/304RSVB
+# Sourced and modified from: https://bit.ly/304RSVB
 
 import torch
 import torchvision
