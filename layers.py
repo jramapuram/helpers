@@ -3703,7 +3703,9 @@ def get_polyak_prediction(model, pred_fn):
 
 def polyak_ema_parameters(model, decay=0.9999):
     """Apply Polyak averaging to the provided model with given decay."""
-    assert hasattr(model, 'polyak_ema'), "model needs to create EMA op as a member and initialize it."
+    if not hasattr(model, 'polyak_ema'):
+        model.polyak_ema = EMA(decay=decay)
+
     model.polyak_ema(nn.utils.parameters_to_vector(model.parameters()))
 
 
