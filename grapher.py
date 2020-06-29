@@ -7,6 +7,8 @@ import gc
 import six
 import asyncio
 
+from functools import partial
+
 from tensorboardX.writer import SummaryWriter
 from .visdom_writer import VisdomWriter
 
@@ -41,8 +43,8 @@ class Grapher:
                         # Don't use async for pickling or if we are using tensorboard
                         non_async_fns = ['pickle_data', 'close', 'reconnect_and_replay_log', '__init__', '_connect']
                         if attr not in non_async_fns and 'tensorboard' not in subscriber_name:
-                            fn = getattr(subscriber, attr)
-                            asyncio.get_event_loop().run_in_executor(None, fn, *args, *kwargs)
+                            fn = partial(getattr(subscriber, attr), *args, **kwargs)
+                            asyncio.get_event_loop().run_in_executor(None, fn)
                         else:
                             getattr(subscriber, attr)(*args, **kwargs)
 

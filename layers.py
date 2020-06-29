@@ -181,6 +181,24 @@ class DistributedDataParallelPassthrough(nn.parallel.DistributedDataParallel):
             return getattr(self.module, name)
 
 
+@torch.jit.script
+def instance_std(x: torch.Tensor, eps: float = 1e-5):
+    """JIT-d helper to do instance standard deviation."""
+    var = torch.var(x, dim=(2, 3), keepdim=True).expand_as(x)
+    if torch.isnan(var).any():
+        var = torch.zeros_like(var)
+    return (var + eps).sqrt_()
+
+
+@torch.jit.script
+def group_std(x: torch.Tensor, groups: int = 32, eps: float = 1e-5):
+    """JIT-d helper to do group standard deviation."""
+    N, C, H, W = x.size()
+    x = x.view(N, groups, C // groups, H, W).contiguous()
+    var = torch.var(x, dim=(2, 3, 4), keepdim=True).expand_as(x)
+    return (var + eps).sqrt_().view(N, C, H, W).contiguous()
+
+
 class EvoNorm2D(nn.Module):
     """An Evonorm implementation cleaned up from https://bit.ly/2SVb8Az"""
     __constants__ = ['eps', 'num_groups', 'non_linear', 'version',
@@ -217,18 +235,6 @@ class EvoNorm2D(nn.Module):
             'non_linear={non_linear}, affine={affine}, momentum={momentum}, ' \
             'affine={affine}, eps={eps}'.format(**self.__dict__)
 
-    def instance_std(self, x: torch.Tensor, eps: float = 1e-5):
-        var = torch.var(x, dim=(2, 3), keepdim=True).expand_as(x)
-        if torch.isnan(var).any():
-            var = torch.zeros_like(var)
-        return torch.sqrt(var + eps)
-
-    def group_std(self, x: torch.Tensor, groups: int = 32, eps: float = 1e-5):
-        N, C, H, W = x.size()
-        x = torch.reshape(x, (N, groups, C // groups, H, W))
-        var = torch.var(x, dim=(2, 3, 4), keepdim=True).expand_as(x)
-        return torch.reshape(torch.sqrt(var + eps), (N, C, H, W))
-
     def reset_parameters(self):
         self.running_var.fill_(1)
 
@@ -237,7 +243,7 @@ class EvoNorm2D(nn.Module):
         if self.version == 'S0':    # Group statistics version
             if self.non_linear:
                 num = x * torch.sigmoid(self.v * x)
-                return num / self.group_std(x, groups=self.num_groups, eps=self.eps) * self.gamma + self.beta
+                return num / group_std(x, groups=self.num_groups, eps=self.eps) * self.gamma + self.beta
 
             return x * self.gamma + self.beta
         elif self.version == 'B0':  # Batch statistics version
@@ -249,7 +255,7 @@ class EvoNorm2D(nn.Module):
                 var = self.running_var
 
             if self.non_linear:
-                den = torch.max((var + self.eps).sqrt(), self.v * x + self.instance_std(x, eps=self.eps))
+                den = torch.max((var + self.eps).sqrt(), self.v * x + instance_std(x, eps=self.eps))
                 return x / den * self.gamma + self.beta
 
             return x * self.gamma + self.beta

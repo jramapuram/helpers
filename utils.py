@@ -204,10 +204,9 @@ def ones_like(tensor):
     return torch.ones_like(tensor)
 
 
-def scale(val, src, dst):
-    """Helper to scale val from src range to dst range
-    """
-    return ((val - src[0]) / (src[1]-src[0])) * (dst[1]-dst[0]) + dst[0]
+def scale(val, newmin, newmax, oldmin, oldmax):
+    ''' helper to scale [oldmin, oldmax] --> [newmin, newmax] '''
+    return (((val - oldmin) * (newmax - newmin)) / (oldmax - oldmin)) + newmin
 
 
 def l2_normalize(x, dim=None, eps=1e-12):

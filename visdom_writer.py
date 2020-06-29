@@ -88,7 +88,7 @@ class VisdomWriter:
                 },
             )
 
-        self.save()
+        # self.save()
 
     def add_scalars(self, main_tag, tag_scalar_dict, global_step=None):
         """Adds many scalar data to summary.
@@ -115,7 +115,7 @@ class VisdomWriter:
         for key in tag_scalar_dict.keys():
             self.add_scalar(key, tag_scalar_dict[key], global_step, main_tag)
 
-        self.save()
+        # self.save()
 
     def set_data(self, scalar_dict, window_dict):
         """ Helper to restore a scalar dict from disk
@@ -156,7 +156,7 @@ class VisdomWriter:
         """
         values = make_np(values)
         self.vis.histogram(make_np(values), opts={'title': tag})
-        self.save()
+        # self.save()
 
     def add_heatmap(self, tag, values, global_step=None):
         """Add histogram to summary.
@@ -170,9 +170,9 @@ class VisdomWriter:
         """
         values = make_np(values)
         self.vis.heatmap(make_np(values), opts={'title': tag})
-        self.save()
+        # self.save()
 
-    def add_image(self, tag, img_tensor, global_step=None, caption=None):
+    def add_image(self, tag, img_tensor, global_step=None, caption=None, store_history=False):
         """Add image data to summary.
 
         Note that this requires the ``pillow`` package.
@@ -187,10 +187,9 @@ class VisdomWriter:
         """
         fn = self.vis.images if len(img_tensor.shape) > 3 else self.vis.image
         img_tensor = make_np(img_tensor)
-        store_history = 'reconstruction' in tag or 'generated' in tag if tag is not None else False
         fn(img_tensor, win=tag,
            opts={'title': tag, 'caption': caption, 'store_history': store_history})
-        self.save()
+        # self.save()
 
     def add_figure(self, tag, figure, global_step=None, close=True):
         """Render matplotlib figure into an image and add it to summary.
@@ -204,7 +203,7 @@ class VisdomWriter:
             close (bool): Flag to automatically close the figure
         """
         self.add_image(tag, figure_to_image(figure, close), global_step)
-        self.save()
+        # self.save()
 
     def add_video(self, tag, vid_tensor, global_step=None, fps=4):
         """Add video data to summary.
@@ -243,7 +242,7 @@ class VisdomWriter:
         else:
             self.vis.video(tensor=vid_tensor, opts={'fps': fps})
 
-        self.save()
+        # self.save()
 
     def add_audio(self, tag, snd_tensor, global_step=None, sample_rate=44100):
         """Add audio data to summary.
@@ -259,7 +258,7 @@ class VisdomWriter:
         """
         snd_tensor = make_np(snd_tensor)
         self.vis.audio(tensor=snd_tensor, opts={'sample_frequency': sample_rate})
-        self.save()
+        # self.save()
 
     def add_text(self, tag, text_string, global_step=None, append=False):
         """Add text data to summary.
@@ -280,7 +279,7 @@ class VisdomWriter:
         else:
             self.vis.text(text_string, win=tag, append=append)
 
-        self.save()
+        # self.save()
 
     def add_graph_onnx(self, prototxt):
         # TODO: Visdom doesn't support graph visualization yet, so this is a no-op
@@ -324,7 +323,7 @@ class VisdomWriter:
                 'ylabel': 'precision',
             },
         )
-        self.save()
+        # self.save()
 
     def add_pr_curve_raw(self, tag, true_positive_counts,
                          false_positive_counts,
@@ -357,7 +356,7 @@ class VisdomWriter:
                 'ylabel': 'precision',
             },
         )
-        self.save()
+        # self.save()
 
     def save(self):
         self.vis.save([self.env])
