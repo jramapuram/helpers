@@ -2,6 +2,7 @@ import os
 import pickle
 import tempfile
 import torch
+import inspect
 import functools
 import torch.nn as nn
 import torch.nn.functional as F
@@ -148,6 +149,92 @@ class SNLinear(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+
+class SineConv2d(nn.Module):
+    """Conv2d +sine activation layer."""
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                 padding=0, dilation=1, groups=1, bias=True, padding_mode='zeros',
+                 omega_0=10, is_first=False, layer_type=nn.Conv2d):
+        super(SineConv2d, self).__init__()
+        self.net = layer_type(in_channels, out_channels, kernel_size, stride=stride,
+                              padding=padding, dilation=dilation, groups=groups,
+                              bias=bias, padding_mode=padding_mode)
+        self.omega_0 = float(os.environ.get('OMEGA', 10))
+        print('using omega = {}'.format(self.omega_0))
+        self.is_first = is_first
+        self.in_features = self.net.weight.size(1)
+        self.out_features = self.net.weight.size(0)
+        self.init_weights()
+        self.weight = self.net.weight
+
+    def init_weights(self):
+        with torch.no_grad():
+            if self.is_first:
+                nn.init.xavier_uniform_(self.net.weight, gain=1.)
+            else:
+                nn.init.xavier_uniform_(self.net.weight, gain=1.0/self.omega_0)
+
+    def extra_repr(self):
+        return 'is_first={is_first}, omega_0={omega_0}, in_features={in_features}, ' \
+            'out_features={out_features}'.format(**self.__dict__)
+
+    def forward(self, x):
+        return torch.sin(self.omega_0 * self.net(x))
+
+
+class SineConvTranspose2d(SineConv2d):
+    """Conv2dTranspose +sine activation layer."""
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                 padding=0, output_padding=0, dilation=1, groups=1, bias=True, padding_mode='zeros',
+                 omega_0=30, is_first=False, layer_type=nn.ConvTranspose2d):
+        layer_fn = functools.partial(layer_type, output_padding=output_padding)
+        super(SineConvTranspose2d, self).__init__(in_channels=in_channels,
+                                                  out_channels=out_channels,
+                                                  kernel_size=kernel_size,
+                                                  stride=stride,
+                                                  padding=padding,
+                                                  dilation=dilation,
+                                                  groups=groups,
+                                                  bias=bias,
+                                                  padding_mode=padding_mode,
+                                                  omega_0=omega_0,
+                                                  is_first=is_first,
+                                                  layer_type=layer_fn)
+
+
+class SineLinear(nn.Module):
+    """Linear layer + sine activation. Sourced from https://bit.ly/31vGaE8"""
+    def __init__(self, in_features, out_features, bias=True,
+                 omega_0=30, is_first=False, layer_type=nn.Linear):
+        super(SineLinear, self).__init__()
+        self.omega_0 = omega_0
+        self.is_first = is_first
+        self.in_features = in_features
+
+        # the underlying network
+        self.linear = nn.Linear(in_features, out_features, bias=bias)
+        self.init_weights()  # do the sine init
+
+    def init_weights(self):
+        with torch.no_grad():
+            if self.is_first:
+                self.linear.weight.uniform_(-1 / self.in_features,
+                                            1 / self.in_features)
+            else:
+                self.linear.weight.uniform_(-np.sqrt(6 / self.in_features) / self.omega_0,
+                                            np.sqrt(6 / self.in_features) / self.omega_0)
+
+    def extra_repr(self):
+        return 'is_first={is_first}, omega_0={omega_0}, in_features={in_features}'.format(**self.__dict__)
+
+    def forward(self, input):
+        return torch.sin(self.omega_0 * self.linear(input))
+
+    def forward_with_intermediate(self, input):
+        # For visualization of activation distributions
+        intermediate = self.omega_0 * self.linear(input)
+        return torch.sin(intermediate), intermediate
 
 
 class LabelSmoothing(nn.Module):
@@ -457,7 +544,7 @@ class CoordConv(nn.Module):
 
     def __init__(self, in_channels, out_channels, kernel_size,
                  stride=1, padding=0, dilation=1, groups=1, bias=True,
-                 with_r=True):
+                 padding_mode='zeros', with_r=True):
         super(CoordConv, self).__init__()
 
         in_channels += 2
@@ -467,7 +554,8 @@ class CoordConv(nn.Module):
         self.conv_layer = nn.Conv2d(in_channels, out_channels,
                                     kernel_size, stride=stride,
                                     padding=padding, dilation=dilation,
-                                    groups=groups, bias=bias)
+                                    groups=groups, bias=bias,
+                                    padding_mode=padding_mode)
         self.coord_adder = AddCoordinates(with_r)
         self.weight = self.conv_layer.weight
 
@@ -511,7 +599,7 @@ class CoordConvTranspose(nn.Module):
 
     def __init__(self, in_channels, out_channels, kernel_size,
                  stride=1, padding=0, output_padding=0, groups=1, bias=True,
-                 dilation=1, with_r=True):
+                 padding_mode='zeros', dilation=1, with_r=True):
         super(CoordConvTranspose, self).__init__()
 
         in_channels += 2
@@ -523,6 +611,7 @@ class CoordConvTranspose(nn.Module):
                                                 padding=padding,
                                                 output_padding=output_padding,
                                                 groups=groups, bias=bias,
+                                                padding_mode=padding_mode,
                                                 dilation=dilation)
         self.coord_adder = AddCoordinates(with_r)
         self.weight = self.conv_tr_layer.weight
@@ -702,18 +791,18 @@ class MaskedConv2d(nn.Conv2d):
 
 class GatedConv2d(nn.Module):
     '''from jmtomczak's github '''
-    def __init__(self, input_channels, output_channels, kernel_size,
+    def __init__(self, in_channels, out_channels, kernel_size,
                  stride=1, padding=0, dilation=1, groups=1, activation=None,
-                 bias=True, layer_type=nn.Conv2d):
+                 bias=True, padding_mode='zeros', layer_type=nn.Conv2d):
         super(GatedConv2d, self).__init__()
 
         self.activation = activation
         self.sigmoid = nn.Sigmoid()
 
-        self.h = layer_type(input_channels, output_channels, kernel_size,
+        self.h = layer_type(in_channels, out_channels, kernel_size,
                             stride=stride, padding=padding,
                             dilation=dilation, groups=groups, bias=bias)
-        self.g = layer_type(input_channels, output_channels, kernel_size,
+        self.g = layer_type(in_channels, out_channels, kernel_size,
                             stride=stride, padding=padding,
                             dilation=dilation, groups=groups, bias=bias)
         self.weight_u = None  # to disable adding SN
@@ -1834,16 +1923,20 @@ def _build_conv_stack(input_chans, output_chans,
             normalization_str = 'none' if norm_last_layer is False else normalization_str
             norm_fn = functools.partial(norm_fn, normalization_str=normalization_str)
 
+        # special logic for sine-layers
+        layer_fn_i = layer_fn
+        if idx == 0 and 'sine' in str(layer_fn).lower():
+            layer_fn_i = functools.partial(layer_fn, is_first=True)
+
         li_gn_groups = {'num_groups': _compute_group_norm_planes(chan_out)}
-        layer_i = norm_fn(layer_fn(chan_in, chan_out, kernel_size=k, stride=s),
+        layer_i = norm_fn(layer_fn_i(chan_in, chan_out, kernel_size=k, stride=s),
                           nfeatures=chan_out, **li_gn_groups)
         layers.append(layer_i)
 
-        if not is_last_layer:
-            if chan_out >= 4 and a:
-                layers.append(Attention(chan_out, layer_fn))
+        if not is_last_layer and chan_out >= 4 and a:
+            layers.append(Attention(chan_out, layer_fn))
 
-            layers.append(activation_fn())
+        layers.append(activation_fn())
 
     return nn.Sequential(*layers)
 
@@ -2446,7 +2539,14 @@ class Conv28Decoder(nn.Module):
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=norm_first_layer,
-                                       norm_last_layer=norm_last_layer)
+                                       norm_last_layer=True)
+
+        # the final projection
+        final_normalization_str = normalization_str if norm_last_layer else "none"
+        self.final_conv = add_normalization(nn.Conv2d(output_chans, output_chans, 1),
+                                            normalization_str=final_normalization_str,
+                                            nfeatures=output_chans, ndims=2,
+                                            num_groups=_compute_group_norm_planes(output_chans))
 
     def forward(self, images, upsample_last: bool = False):
         """Iterate over each of the layers to produce an output."""
@@ -2454,6 +2554,7 @@ class Conv28Decoder(nn.Module):
             images = images.unsqueeze(-1).unsqueeze(-1)
 
         outputs = self.model(images)
+        outputs = self.final_conv(outputs)
         if upsample_last:
             return F.upsample(outputs, size=(64, 64),
                               mode='bilinear',
@@ -2483,7 +2584,14 @@ class Conv32Decoder(nn.Module):
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=norm_first_layer,
-                                       norm_last_layer=norm_last_layer)
+                                       norm_last_layer=True)
+
+        # the final projection
+        final_normalization_str = normalization_str if norm_last_layer else "none"
+        self.final_conv = add_normalization(nn.Conv2d(output_chans, output_chans, 1),
+                                            normalization_str=final_normalization_str,
+                                            nfeatures=output_chans, ndims=2,
+                                            num_groups=_compute_group_norm_planes(output_chans))
 
     def forward(self, images, upsample_last: bool = False):
         """Iterate over each of the layers to produce an output."""
@@ -2491,6 +2599,7 @@ class Conv32Decoder(nn.Module):
             images = images.unsqueeze(-1).unsqueeze(-1)
 
         outputs = self.model(images)
+        outputs = self.final_conv(outputs)
         if upsample_last:
             return F.upsample(outputs, size=(32, 32),
                               mode='bilinear',
@@ -2516,7 +2625,14 @@ class Conv64Decoder(nn.Module):
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=norm_first_layer,
-                                       norm_last_layer=norm_last_layer)
+                                       norm_last_layer=True)
+
+        # the final projection
+        final_normalization_str = normalization_str if norm_last_layer else "none"
+        self.final_conv = add_normalization(nn.Conv2d(output_chans, output_chans, 1),
+                                            normalization_str=final_normalization_str,
+                                            nfeatures=output_chans, ndims=2,
+                                            num_groups=_compute_group_norm_planes(output_chans))
 
     def forward(self, images, upsample_last: bool = False):
         """Iterate over each of the layers to produce an output."""
@@ -2525,6 +2641,7 @@ class Conv64Decoder(nn.Module):
             images = images.unsqueeze(-1).unsqueeze(-1)
 
         outputs = self.model(images)
+        outputs = self.final_conv(outputs)
         if upsample_last:
             return F.upsample(outputs, size=(64, 64),
                               mode='bilinear',
@@ -2550,7 +2667,14 @@ class Conv128Decoder(nn.Module):
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=norm_first_layer,
-                                       norm_last_layer=norm_last_layer)
+                                       norm_last_layer=True)
+
+        # the final projection
+        final_normalization_str = normalization_str if norm_last_layer else "none"
+        self.final_conv = add_normalization(nn.Conv2d(output_chans, output_chans, 1),
+                                            normalization_str=final_normalization_str,
+                                            nfeatures=output_chans, ndims=2,
+                                            num_groups=_compute_group_norm_planes(output_chans))
 
     def forward(self, images, upsample_last: bool = False):
         """Iterate over each of the layers to produce an output."""
@@ -2558,6 +2682,7 @@ class Conv128Decoder(nn.Module):
             images = images.unsqueeze(-1).unsqueeze(-1)
 
         outputs = self.model(images)
+        outputs = self.final_conv(outputs)
         if upsample_last:
             return F.upsample(outputs, size=(128, 128),
                               mode='bilinear',
@@ -2583,7 +2708,14 @@ class Conv256Decoder(nn.Module):
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=norm_first_layer,
-                                       norm_last_layer=norm_last_layer)
+                                       norm_last_layer=True)
+
+        # the final projection
+        final_normalization_str = normalization_str if norm_last_layer else "none"
+        self.final_conv = add_normalization(nn.Conv2d(output_chans, output_chans, 1),
+                                            normalization_str=final_normalization_str,
+                                            nfeatures=output_chans, ndims=2,
+                                            num_groups=_compute_group_norm_planes(output_chans))
 
     def forward(self, images, upsample_last: bool = False):
         """Iterate over each of the layers to produce an output."""
@@ -2591,6 +2723,7 @@ class Conv256Decoder(nn.Module):
             images = images.unsqueeze(-1).unsqueeze(-1)
 
         outputs = self.model(images)
+        outputs = self.final_conv(outputs)
         if upsample_last:
             return F.upsample(outputs, size=(128, 128),
                               mode='bilinear',
@@ -2690,7 +2823,7 @@ class Resnet64Encoder(nn.Module):
 
         # Do a final linear projection on the pooled representation
         self.final_conv = nn.Sequential(
-            layer_fn(final_resblock_chans, output_size, kernel_size=1),
+            nn.Conv2d(final_resblock_chans, output_size, kernel_size=1),
             norm_layer
         )
 
@@ -2702,6 +2835,31 @@ class Resnet64Encoder(nn.Module):
         outputs = outputs.view(list(outputs.shape) + [1, 1])  # un-flatten and do 1x1
         outputs = self.final_conv(outputs)                    # 1x1 conv
         return outputs
+
+
+def convert_layer(container, from_layer, to_layer, set_from_layer_kwargs: bool = True):
+    """Convert from_layer to to_layer for all layers in container.
+
+    :param container: torch container, nn.Sequential, etc.
+    :param from_layer: a class definition (eg: nn.Conv2d)
+    :param to_layer: a class defition (eg: GatedConv2d)
+    :param set_from_layer_kwargs: uses the kwargs from from_layer and set to_layer values
+    :returns: nothing, modifies container in place
+    :rtype: None
+
+    """
+    for child_name, child in container.named_children():
+        if isinstance(child, from_layer):
+            to_layer_i = to_layer
+            if set_from_layer_kwargs:
+                signature_list = inspect.getfullargspec(from_layer).args[1:]  # 0th element is arg-list, 0th of that is 'self'
+                kwargs = {sig: getattr(child, sig) if sig != 'bias' else bool(child.bias is not None)
+                          for sig in signature_list}
+                to_layer_i = functools.partial(to_layer, **kwargs)
+
+            setattr(container, child_name, to_layer_i())
+        else:
+            convert_layer(child, from_layer, to_layer, set_from_layer_kwargs=set_from_layer_kwargs)
 
 
 class Resnet32Encoder(nn.Module):
@@ -3033,12 +3191,19 @@ class Conv28Encoder(nn.Module):
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=False,  # dont norm inputs
-                                       norm_last_layer=norm_last_layer)
+                                       norm_last_layer=True)
+
+        # the final projection
+        final_normalization_str = normalization_str if norm_last_layer else "none"
+        self.final_conv = add_normalization(nn.Conv2d(output_size, output_size, 1),
+                                            normalization_str=final_normalization_str,
+                                            nfeatures=output_size, ndims=2,
+                                            num_groups=_compute_group_norm_planes(output_size))
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
         assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
-        return self.model(images)
+        return self.final_conv(self.model(images))
 
 
 class Conv32Encoder(nn.Module):
@@ -3062,12 +3227,19 @@ class Conv32Encoder(nn.Module):
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=False,  # dont norm inputs
-                                       norm_last_layer=norm_last_layer)
+                                       norm_last_layer=True)
+
+        # the final projection
+        final_normalization_str = normalization_str if norm_last_layer else "none"
+        self.final_conv = add_normalization(nn.Conv2d(output_size, output_size, 1),
+                                            normalization_str=final_normalization_str,
+                                            nfeatures=output_size, ndims=2,
+                                            num_groups=_compute_group_norm_planes(output_size))
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
         assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
-        return self.model(images)
+        return self.final_conv(self.model(images))
 
 
 class Conv64Encoder(nn.Module):
@@ -3088,12 +3260,19 @@ class Conv64Encoder(nn.Module):
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=False,  # dont norm inputs
-                                       norm_last_layer=norm_last_layer)
+                                       norm_last_layer=True)
+
+        # the final projection
+        final_normalization_str = normalization_str if norm_last_layer else "none"
+        self.final_conv = add_normalization(nn.Conv2d(output_size, output_size, 1),
+                                            normalization_str=final_normalization_str,
+                                            nfeatures=output_size, ndims=2,
+                                            num_groups=_compute_group_norm_planes(output_size))
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
         assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
-        return self.model(images)
+        return self.final_conv(self.model(images))
 
 
 class Conv128Encoder(nn.Module):
@@ -3114,12 +3293,19 @@ class Conv128Encoder(nn.Module):
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=False,  # dont norm inputs
-                                       norm_last_layer=norm_last_layer)
+                                       norm_last_layer=True)
+
+        # the final projection
+        final_normalization_str = normalization_str if norm_last_layer else "none"
+        self.final_conv = add_normalization(nn.Conv2d(output_size, output_size, 1),
+                                            normalization_str=final_normalization_str,
+                                            nfeatures=output_size, ndims=2,
+                                            num_groups=_compute_group_norm_planes(output_size))
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
         assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
-        return self.model(images)
+        return self.final_conv(self.model(images))
 
 
 def _build_dense(input_size,
@@ -3146,8 +3332,13 @@ def _build_dense(input_size,
     if norm_last_layer and normalization_str not in ['weightnorm', 'spectralnorm']:
         final_norm_layer = norm_fn(final_norm_layer, nfeatures=output_size)
 
+    # special logic for sine-layers
+    layer_name = str(layer_fn).lower()
+    init_layer_fn = functools.partial(layer_fn, is_first=True) \
+        if 'sine' in layer_name else layer_fn
+
     layers = [('init_norm', init_norm_layer),
-              ('l0', norm_fn(layer_fn(input_size, latent_size), nfeatures=latent_size)),
+              ('l0', norm_fn(init_layer_fn(input_size, latent_size), nfeatures=latent_size)),
               ('act0', activation_fn())]
 
     for i in range(num_layers - 2):  # 2 for init layer[above] + final layer[below]
@@ -3156,7 +3347,7 @@ def _build_dense(input_size,
         )
         layers.append(('act{}'.format(i+1), activation_fn()))
 
-    layers.append(('output', layer_fn(latent_size, output_size)))
+    layers.append(('output', nn.Linear(latent_size, output_size)))
     layers.append(('final_norm', final_norm_layer))
     return nn.Sequential(OrderedDict(layers))
 
@@ -3270,6 +3461,14 @@ def get_resnet_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
                                                norm_last_layer=norm_last_layer,
                                                activation_str=activation,
                                                layer_fn=SNConv2d),
+            'sine': functools.partial(resnet_size_dict[image_size],
+                                      input_chans=chans,
+                                      base_channels=encoder_base_channels,
+                                      channel_multiplier=encoder_channel_multiplier,
+                                      normalization_str=conv_normalization,
+                                      norm_last_layer=norm_last_layer,
+                                      activation_str=activation,
+                                      layer_fn=SineConv2d),
             'none': functools.partial(resnet_size_dict[image_size],
                                       input_chans=chans,
                                       base_channels=encoder_base_channels,
@@ -3463,6 +3662,14 @@ def get_conv_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
                                                norm_last_layer=norm_last_layer,
                                                activation_str=activation,
                                                layer_fn=SNConv2d),
+            'sine': functools.partial(conv_size_dict[image_size],
+                                      input_chans=chans,
+                                      base_channels=encoder_base_channels,
+                                      channel_multiplier=encoder_channel_multiplier,
+                                      normalization_str=conv_normalization,
+                                      norm_last_layer=norm_last_layer,
+                                      activation_str=activation,
+                                      layer_fn=SineConv2d),
             'none': functools.partial(conv_size_dict[image_size],
                                       input_chans=chans,
                                       base_channels=encoder_base_channels,
@@ -3489,6 +3696,14 @@ def get_conv_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
                                                norm_last_layer=norm_last_layer,
                                                activation_str=activation,
                                                layer_fn=functools.partial(SNConv2d, layer_type=BatchConv2D)),
+            'sine': functools.partial(conv_size_dict[image_size],
+                                      input_chans=chans,
+                                      base_channels=encoder_base_channels,
+                                      channel_multiplier=encoder_channel_multiplier,
+                                      normalization_str=conv_normalization,
+                                      norm_last_layer=norm_last_layer,
+                                      activation_str=activation,
+                                      layer_fn=functools.partial(SineConv2d, layer_type=BatchConv2D)),
             'none': functools.partial(conv_size_dict[image_size],
                                       input_chans=chans,
                                       base_channels=encoder_base_channels,
@@ -3515,6 +3730,14 @@ def get_conv_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
                                                norm_last_layer=norm_last_layer,
                                                activation_str=activation,
                                                layer_fn=functools.partial(SNConv2d, layer_type=CoordConv)),
+            'sine': functools.partial(conv_size_dict[image_size],
+                                      input_chans=chans,
+                                      base_channels=encoder_base_channels,
+                                      channel_multiplier=encoder_channel_multiplier,
+                                      normalization_str=conv_normalization,
+                                      norm_last_layer=norm_last_layer,
+                                      activation_str=activation,
+                                      layer_fn=functools.partial(SineConv2d, layer_type=CoordConv)),
             'none': functools.partial(conv_size_dict[image_size],
                                       input_chans=chans,
                                       base_channels=encoder_base_channels,
@@ -3565,6 +3788,15 @@ def get_dense_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W
                                                activation_str=activation,
                                                normalization_str=dense_normalization,
                                                layer_fn=SNLinear),
+            'sine': functools.partial(DenseEncoder,
+                                      input_shape=input_shape,
+                                      latent_size=latent_size,
+                                      num_layers=num_layers,
+                                      norm_first_layer=norm_first_layer,
+                                      norm_last_layer=norm_last_layer,
+                                      activation_str=activation,
+                                      normalization_str=dense_normalization,
+                                      layer_fn=SineLinear),
             'none': functools.partial(DenseEncoder,
                                       input_shape=input_shape,
                                       latent_size=latent_size,
@@ -3583,17 +3815,17 @@ def get_dense_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W
 
 
 def get_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W]
-                encoder_layer_type: str = 'conv',  # For conv models only
-                encoder_base_channels: int = 32,   # For conv models only
+                encoder_layer_type: str = 'conv',      # For conv models only
+                encoder_base_channels: int = 32,       # For conv models only
                 encoder_channel_multiplier: int = 2,
-                latent_size: int = 512,            # For dense models only
-                num_layers: int = 3,               # For dense models only
+                latent_size: int = 512,                # For dense models only
+                num_layers: int = 3,                   # For dense models only
                 dense_normalization: str = 'none',
                 conv_normalization: str = 'none',
-                layer_modifier: str = 'none',      # 'gated', 'spectral_norm' or 'coordconv'
+                encoder_layer_modifier: str = 'none',  # 'gated', 'spectral_norm' or 'coordconv'
                 norm_first_layer: bool = False,
                 norm_last_layer: bool = False,
-                activation: str = 'relu',
+                encoder_activation: str = 'relu',
                 pretrained: bool = True,
                 freeze_base: bool = False,
                 name: str = 'encoder',
@@ -3608,7 +3840,7 @@ def get_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W]
                                        conv_normalization=conv_normalization,
                                        norm_first_layer=norm_first_layer,
                                        norm_last_layer=norm_last_layer,
-                                       activation=activation,
+                                       activation=encoder_activation,
                                        pretrained=pretrained,
                                        freeze_base=freeze_base,
                                        name=name, **unused_kwargs)
@@ -3618,10 +3850,10 @@ def get_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W]
                                 encoder_base_channels=encoder_base_channels,
                                 encoder_channel_multiplier=encoder_channel_multiplier,
                                 conv_normalization=conv_normalization,
-                                layer_modifier=layer_modifier,
+                                layer_modifier=encoder_layer_modifier,
                                 norm_first_layer=norm_first_layer,
                                 norm_last_layer=norm_last_layer,
-                                activation=activation,
+                                activation=encoder_activation,
                                 pretrained=pretrained,
                                 name=name, **unused_kwargs)
     elif encoder_layer_type == 'resnet':
@@ -3631,10 +3863,10 @@ def get_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W]
                                   latent_size=latent_size,
                                   dense_normalization=dense_normalization,
                                   conv_normalization=conv_normalization,
-                                  layer_modifier=layer_modifier,
+                                  layer_modifier=encoder_layer_modifier,
                                   norm_first_layer=norm_first_layer,
                                   norm_last_layer=norm_last_layer,
-                                  activation=activation,
+                                  activation=encoder_activation,
                                   pretrained=pretrained,
                                   name=name, **unused_kwargs)
     elif encoder_layer_type == 'dense':
@@ -3642,10 +3874,10 @@ def get_encoder(input_shape: Union[int, Tuple[int, int, int]],  # [C, H, W]
                                  latent_size=latent_size,
                                  num_layers=num_layers,
                                  dense_normalization=dense_normalization,
-                                 layer_modifier=layer_modifier,
+                                 layer_modifier=encoder_layer_modifier,
                                  norm_first_layer=norm_first_layer,
                                  norm_last_layer=norm_last_layer,
-                                 activation=activation,
+                                 activation=encoder_activation,
                                  pretrained=pretrained,
                                  name=name, **unused_kwargs)
     else:
@@ -3709,6 +3941,17 @@ def get_resnet_decoder(output_shape: Tuple[int, int, int],     # output image sh
                                                activation_str=activation,
                                                dense_layer_fn=SNLinear,
                                                conv_layer_fn=SNConv2d),
+            'sine': functools.partial(resnet_size_dict[image_size],
+                                      output_chans=output_shape[0],
+                                      base_channels=decoder_base_channels,
+                                      channel_multiplier=decoder_channel_multiplier,
+                                      conv_normalization_str=conv_normalization,
+                                      dense_normalization_str=dense_normalization,
+                                      norm_first_layer=norm_first_layer,
+                                      norm_last_layer=norm_last_layer,
+                                      activation_str=activation,
+                                      dense_layer_fn=SineLinear,
+                                      conv_layer_fn=SineConv2d),
             'coordconv': functools.partial(resnet_size_dict[image_size],
                                            output_chans=output_shape[0],
                                            base_channels=decoder_base_channels,
@@ -3783,6 +4026,15 @@ def get_conv_decoder(output_shape: Tuple[int, int, int],     # output image shap
                                                norm_last_layer=norm_last_layer,
                                                activation_str=activation,
                                                layer_fn=SNConvTranspose2d),
+            'sine': functools.partial(conv_size_dict[image_size],
+                                      output_chans=output_shape[0],
+                                      base_channels=decoder_base_channels,
+                                      channel_multiplier=decoder_channel_multiplier,
+                                      normalization_str=conv_normalization,
+                                      norm_first_layer=norm_first_layer,
+                                      norm_last_layer=norm_last_layer,
+                                      activation_str=activation,
+                                      layer_fn=SineConvTranspose2d),
             'none': functools.partial(conv_size_dict[image_size],
                                       output_chans=output_shape[0],
                                       base_channels=decoder_base_channels,
@@ -3813,6 +4065,16 @@ def get_conv_decoder(output_shape: Tuple[int, int, int],     # output image shap
                                                activation_str=activation,
                                                layer_fn=functools.partial(SNConvTranspose2d,
                                                                           layer_type=BatchConvTranspose2D)),
+            'sine': functools.partial(conv_size_dict[image_size],
+                                      output_chans=output_shape[0],
+                                      base_channels=decoder_base_channels,
+                                      channel_multiplier=decoder_channel_multiplier,
+                                      normalization_str=conv_normalization,
+                                      norm_first_layer=norm_first_layer,
+                                      norm_last_layer=norm_last_layer,
+                                      activation_str=activation,
+                                      layer_fn=functools.partial(SineConvTranspose2d,
+                                                                 layer_type=BatchConvTranspose2D)),
             'none': functools.partial(conv_size_dict[image_size],
                                       output_chans=output_shape[0],
                                       base_channels=decoder_base_channels,
@@ -3843,6 +4105,16 @@ def get_conv_decoder(output_shape: Tuple[int, int, int],     # output image shap
                                                activation_str=activation,
                                                layer_fn=functools.partial(SNConvTranspose2d,
                                                                           layer_type=CoordConvTranspose)),
+            'sine': functools.partial(conv_size_dict[image_size],
+                                      output_chans=output_shape[0],
+                                      base_channels=decoder_base_channels,
+                                      channel_multiplier=decoder_channel_multiplier,
+                                      normalization_str=conv_normalization,
+                                      norm_first_layer=norm_first_layer,
+                                      norm_last_layer=norm_last_layer,
+                                      activation_str=activation,
+                                      layer_fn=functools.partial(SineConvTranspose2d,
+                                                                 layer_type=CoordConvTranspose)),
             'none': functools.partial(conv_size_dict[image_size],
                                       output_chans=output_shape[0],
                                       base_channels=decoder_base_channels,
@@ -3893,6 +4165,15 @@ def get_dense_decoder(output_shape: Union[int, Tuple[int, int, int]],  # output 
                                                activation_str=activation,
                                                normalization_str=dense_normalization,
                                                layer_fn=SNLinear),
+            'sine': functools.partial(DenseDecoder,
+                                      output_shape=output_shape,
+                                      latent_size=latent_size,
+                                      num_layers=num_layers,
+                                      norm_first_layer=norm_first_layer,
+                                      norm_last_layer=norm_last_layer,
+                                      activation_str=activation,
+                                      normalization_str=dense_normalization,
+                                      layer_fn=SineLinear),
             'none': functools.partial(DenseDecoder,
                                       output_shape=output_shape,
                                       latent_size=latent_size,
@@ -3914,14 +4195,14 @@ def get_decoder(output_shape: Union[int, Tuple[int, int, int]],  # output image 
                 decoder_layer_type: str = 'conv',
                 decoder_base_channels: int = 1024,      # For conv models
                 decoder_channel_multiplier: int = 0.5,  # Decoding shrinks channels
-                latent_size: int = 512,   # For dense models
-                num_layers: int = 3,      # For dense models
+                latent_size: int = 512,                 # For dense models
+                num_layers: int = 3,                    # For dense models
                 dense_normalization: str = 'none',
                 conv_normalization: str = 'none',
-                layer_modifier: str = 'none',   # 'gated', 'spectral_norm' or coordconv
+                decoder_layer_modifier: str = 'none',   # 'gated', 'spectral_norm' or coordconv
                 norm_first_layer: bool = True,
                 norm_last_layer: bool = False,
-                activation: str = 'relu',
+                decoder_activation: str = 'relu',
                 name: str = 'decoder',
                 **unused_kwargs):
     '''Helper to return the correct decoder.'''
@@ -3932,10 +4213,10 @@ def get_decoder(output_shape: Union[int, Tuple[int, int, int]],  # output image 
                                 decoder_channel_multiplier=decoder_channel_multiplier,
                                 latent_size=latent_size,
                                 conv_normalization=conv_normalization,
-                                layer_modifier=layer_modifier,
+                                layer_modifier=decoder_layer_modifier,
                                 norm_first_layer=norm_first_layer,
                                 norm_last_layer=norm_last_layer,
-                                activation=activation,
+                                activation=decoder_activation,
                                 name=name, **unused_kwargs)
     elif decoder_layer_type == 'resnet':
         return get_resnet_decoder(output_shape=output_shape,
@@ -3943,20 +4224,20 @@ def get_decoder(output_shape: Union[int, Tuple[int, int, int]],  # output image 
                                   decoder_channel_multiplier=decoder_channel_multiplier,
                                   dense_normalization=dense_normalization,
                                   conv_normalization=conv_normalization,
-                                  layer_modifier=layer_modifier,
+                                  layer_modifier=decoder_layer_modifier,
                                   norm_first_layer=norm_first_layer,
                                   norm_last_layer=norm_last_layer,
-                                  activation=activation,
+                                  activation=decoder_activation,
                                   name=name, **unused_kwargs)
     elif decoder_layer_type == 'dense':
         return get_dense_decoder(output_shape=output_shape,
                                  latent_size=latent_size,
                                  num_layers=num_layers,
                                  dense_normalization=dense_normalization,
-                                 layer_modifier=layer_modifier,
+                                 layer_modifier=decoder_layer_modifier,
                                  norm_first_layer=norm_first_layer,
                                  norm_last_layer=norm_last_layer,
-                                 activation=activation,
+                                 activation=decoder_activation,
                                  name=name, **unused_kwargs)
     else:
         raise ValueError("unknown decoder type requested: {}".format(decoder_layer_type))
