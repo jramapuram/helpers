@@ -26,6 +26,9 @@ class View(nn.Module):
         super(View, self).__init__()
         self.shape = shape
 
+    def __repr__(self):
+        return 'View({})'.format(self.shape)
+
     def forward(self, input):
         return input.contiguous().view(*self.shape)
 
@@ -36,6 +39,9 @@ class Permute(nn.Module):
     def __init__(self, dims):
         super(Permute, self).__init__()
         self.dims = dims
+
+    def __repr__(self):
+        return 'Permute({})'.format(self.dims)
 
     def forward(self, input):
         return input.permute(self.dims).contiguous()

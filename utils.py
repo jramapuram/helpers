@@ -678,6 +678,8 @@ def get_name(args):
         args.uid if args.uid else "",
         "_".join(["{}{}".format(k, v) for k, v in filtered.items()])
     ).replace('groupnorm', 'gn')
+                           .replace('clamp', 'C')
+                           .replace('celeba', 'CA')
                            .replace('l2msssim', 'l2M')
                            .replace('evonorm', 'en')
                            .replace('spectral_norm', 'sn')
