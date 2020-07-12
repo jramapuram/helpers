@@ -2096,6 +2096,79 @@ class VolumePreservingResnet(nn.Module):
         return self.model(images)
 
 
+class Resnet28Decoder(nn.Module):
+    def __init__(self, input_size, output_chans, base_channels=1024, channel_multiplier=0.5,
+                 activation_str="relu", conv_normalization_str="none", dense_normalization_str="none",
+                 norm_first_layer=True, norm_last_layer=False, conv_layer_fn=nn.Conv2d,
+                 dense_layer_fn=nn.Linear, block_type=BasicBlock):
+        super(Resnet28Decoder, self).__init__()
+        assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
+        self.act = str_to_activ_module(activation_str)
+
+        # Handle pre-decoder and post-decoder normalization
+        def build_norm_layer(normalization_str, use_norm, feature_size, ndims=1):
+            norm_layer = Identity()
+            if use_norm and normalization_str not in ['weightnorm', 'spectralnorm'] and normalization_str != 'none':
+                gn_groups = {"num_groups": _compute_group_norm_planes(feature_size)}
+                norm_layer = add_normalization(norm_layer, normalization_str,
+                                               ndims=ndims, nfeatures=feature_size, **gn_groups)
+            return norm_layer
+
+        init_norm = build_norm_layer(dense_normalization_str, norm_first_layer, input_size)
+        final_norm = build_norm_layer(conv_normalization_str, norm_last_layer, output_chans, ndims=2)
+
+        # Project to 7x7 first
+        mlp_feature_size = input_size*7*7
+        self.mlp_proj = nn.Sequential(
+            View([-1, input_size]),
+            init_norm,
+            add_normalization(dense_layer_fn(input_size, mlp_feature_size),
+                              dense_normalization_str, ndims=1, nfeatures=mlp_feature_size),
+            str_to_activ_module(activation_str if 'evonorm' not in conv_normalization_str else 'relu')(),
+            View([-1, input_size, 7, 7]),
+        )
+
+        # The main model
+        final_resblock_chans = int(base_channels * (channel_multiplier ** 3))
+        self.model = _build_resnet_stack(input_chans=input_size,
+                                         output_chans=final_resblock_chans,
+                                         layer_fn=conv_layer_fn,
+                                         base_channels=base_channels,
+                                         channel_multiplier=channel_multiplier,
+                                         kernels=[3, 3],
+                                         strides=[1, 1],
+                                         resample=[True, True],
+                                         attentions=[False, False],  # following BigGAN no attention on < 32x32
+                                         resample_fn=nn.Upsample(scale_factor=2),
+                                         # resample_fn=functools.partial(F.interpolate, scale_factor=2),
+                                         activation_str=activation_str,
+                                         normalization_str=conv_normalization_str,
+                                         block_type=block_type,
+                                         norm_first_layer=False,  # Handled already
+                                         norm_last_layer=True)    # We have a final conv
+        self.final_conv = nn.Sequential(
+            self.act(),
+            nn.Conv2d(final_resblock_chans, output_chans, kernel_size=1, stride=1),
+            final_norm
+        )
+
+    def forward(self, images, upsample_last: bool = False):
+        """Iterate over each of the layers to produce an output."""
+        if images.dim() == 2:
+            images = images.unsqueeze(-1).unsqueeze(-1)
+
+        outputs = self.mlp_proj(images)
+        outputs = self.model(outputs)
+        outputs = self.final_conv(outputs)
+
+        if upsample_last:
+            return F.upsample(outputs, size=(28, 28),
+                              mode='bilinear',
+                              align_corners=True)
+
+        return outputs
+
+
 class Resnet32Decoder(nn.Module):
     def __init__(self, input_size, output_chans, base_channels=1024, channel_multiplier=0.5,
                  activation_str="relu", conv_normalization_str="none", dense_normalization_str="none",
@@ -3959,6 +4032,7 @@ def get_resnet_decoder(output_shape: Tuple[int, int, int],     # output image sh
         128: Resnet128Decoder,
         64: Resnet64Decoder,
         32: Resnet32Decoder,
+        28: Resnet28Decoder,
     }
     image_size = output_shape[-1]
 
