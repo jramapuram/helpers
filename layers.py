@@ -1190,6 +1190,7 @@ class UpsampleConvLayer(nn.Module):
         reflection_padding = kernel_size // 2
         self.reflection_pad = nn.ReflectionPad2d(reflection_padding)
         self.conv2d = nn.Conv2d(in_channels, out_channels, kernel_size, stride)
+        self.weight = self.conv2d.weight
 
     def forward(self, x):
         x_in = x
@@ -2021,17 +2022,28 @@ class Conv32UpsampleDecoder(nn.Module):
         )
 
         # The main model
+        kernels = [3, 3, 3]
+        strides = [1, 1, 1]
+        final_chans = int(base_channels * (channel_multiplier ** (len(kernels) - 2)))
         self.model = _build_conv_stack(input_chans=input_size,
-                                       output_chans=output_chans,
+                                       output_chans=final_chans,
                                        layer_fn=layer_fn,
                                        base_channels=base_channels,
                                        channel_multiplier=channel_multiplier,
-                                       kernels=[3, 3, 3],
-                                       strides=[1, 1, 1],
+                                       kernels=kernels[0:-1],
+                                       strides=strides[0:-1],
                                        activation_str=activation_str,
                                        normalization_str=conv_normalization_str,
-                                       norm_first_layer=False,  # Handled already
-                                       norm_last_layer=norm_last_layer)
+                                       norm_first_layer=False,  # Handled already with dense above
+                                       norm_last_layer=True)
+
+        # the final projection
+        final_normalization_str = conv_normalization_str if norm_last_layer else "none"
+        self.final_conv = add_normalization(UpsampleConvLayer(final_chans, output_chans,
+                                                              kernels[-1], stride=strides[-1]),
+                                            normalization_str=final_normalization_str,
+                                            nfeatures=output_chans, ndims=2,
+                                            num_groups=_compute_group_norm_planes(output_chans))
 
     def forward(self, images, upsample_last=False):
         """Iterate over each of the layers to produce an output."""
@@ -2535,13 +2547,16 @@ class Conv28Decoder(nn.Module):
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
 
         # The main model
+        kernels = [4, 4, 4, 4, 1]
+        strides = [1, 2, 1, 2, 1]
+        final_chans = int(base_channels * (channel_multiplier ** (len(kernels) - 2)))
         self.model = _build_conv_stack(input_chans=input_size,
-                                       output_chans=output_chans,
+                                       output_chans=final_chans,
                                        layer_fn=layer_fn,
                                        base_channels=base_channels,
                                        channel_multiplier=channel_multiplier,
-                                       kernels=[4, 4, 4, 4, 1],
-                                       strides=[1, 2, 1, 2, 1],
+                                       kernels=kernels[0:-1],
+                                       strides=strides[0:-1],
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=norm_first_layer,
@@ -2549,7 +2564,8 @@ class Conv28Decoder(nn.Module):
 
         # the final projection
         final_normalization_str = normalization_str if norm_last_layer else "none"
-        self.final_conv = add_normalization(nn.Conv2d(output_chans, output_chans, 1),
+        self.final_conv = add_normalization(nn.ConvTranspose2d(final_chans, output_chans,
+                                                               kernels[-1], stride=strides[-1]),
                                             normalization_str=final_normalization_str,
                                             nfeatures=output_chans, ndims=2,
                                             num_groups=_compute_group_norm_planes(output_chans))
@@ -2576,17 +2592,20 @@ class Conv32Decoder(nn.Module):
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
 
         # The main model
+        kernels = [5, 4, 4, 4]  # NEW ver
+        strides = [1, 2, 1, 2]  # NEW ver
+        # kernels = [5, 1, 4, 1, 4, 1, 4, 1]  # NEW small ver
+        # strides = [1, 1, 2, 1, 1, 1, 2, 1]  # NEW small ver
+        # kernels = [5, 4, 4, 4, 4, 1, 1]     # OLD ver
+        # strides = [1, 2, 1, 2, 1, 1, 1]     # OLD ver
+        final_chans = int(base_channels * (channel_multiplier ** (len(kernels) - 2)))
         self.model = _build_conv_stack(input_chans=input_size,
-                                       output_chans=output_chans,
+                                       output_chans=final_chans,
                                        layer_fn=layer_fn,
                                        base_channels=base_channels,
                                        channel_multiplier=channel_multiplier,
-                                       kernels=[5, 4, 4, 4],  # NEW ver
-                                       strides=[1, 2, 1, 2],  # NEW ver
-                                       # kernels=[5, 1, 4, 1, 4, 1, 4, 1],  # NEW small ver
-                                       # strides=[1, 1, 2, 1, 1, 1, 2, 1],  # NEW small ver
-                                       # kernels=[5, 4, 4, 4, 4, 1, 1],  # OLD ver
-                                       # strides=[1, 2, 1, 2, 1, 1, 1],  # OLD ver
+                                       kernels=kernels[0:-1],
+                                       strides=strides[0:-1],
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=norm_first_layer,
@@ -2594,7 +2613,8 @@ class Conv32Decoder(nn.Module):
 
         # the final projection
         final_normalization_str = normalization_str if norm_last_layer else "none"
-        self.final_conv = add_normalization(nn.Conv2d(output_chans, output_chans, 1),
+        self.final_conv = add_normalization(nn.ConvTranspose2d(final_chans, output_chans,
+                                                               kernels[-1], stride=strides[-1]),
                                             normalization_str=final_normalization_str,
                                             nfeatures=output_chans, ndims=2,
                                             num_groups=_compute_group_norm_planes(output_chans))
@@ -2621,13 +2641,16 @@ class Conv64Decoder(nn.Module):
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
 
         # The main model
+        kernels = [7, 5, 5, 5, 4, 4, 2]
+        strides = [2, 1, 2, 1, 2, 1, 1]
+        final_chans = int(base_channels * (channel_multiplier ** (len(kernels) - 2)))
         self.model = _build_conv_stack(input_chans=input_size,
-                                       output_chans=output_chans,
+                                       output_chans=final_chans,
                                        layer_fn=layer_fn,
                                        base_channels=base_channels,
                                        channel_multiplier=channel_multiplier,
-                                       kernels=[7, 5, 5, 5, 4, 4, 2],
-                                       strides=[2, 1, 2, 1, 2, 1, 1],
+                                       kernels=kernels[0:-1],
+                                       strides=strides[0:-1],
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=norm_first_layer,
@@ -2635,7 +2658,8 @@ class Conv64Decoder(nn.Module):
 
         # the final projection
         final_normalization_str = normalization_str if norm_last_layer else "none"
-        self.final_conv = add_normalization(nn.Conv2d(output_chans, output_chans, 1),
+        self.final_conv = add_normalization(nn.ConvTranspose2d(final_chans, output_chans,
+                                                               kernels[-1], stride=strides[-1]),
                                             normalization_str=final_normalization_str,
                                             nfeatures=output_chans, ndims=2,
                                             num_groups=_compute_group_norm_planes(output_chans))
@@ -2643,7 +2667,6 @@ class Conv64Decoder(nn.Module):
     def forward(self, images, upsample_last: bool = False):
         """Iterate over each of the layers to produce an output."""
         if images.dim() == 2:
-            # images = images.view(*images.size(), 1, 1)
             images = images.unsqueeze(-1).unsqueeze(-1)
 
         outputs = self.model(images)
@@ -2663,21 +2686,24 @@ class Conv128Decoder(nn.Module):
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
 
         # The main model
+        kernels = [7, 7, 7, 7, 7, 5, 4]
+        strides = [2, 2, 1, 2, 1, 2, 1]
+        final_chans = int(base_channels * (channel_multiplier ** (len(kernels) - 2)))
         self.model = _build_conv_stack(input_chans=input_size,
-                                       output_chans=output_chans,
+                                       output_chans=final_chans,
                                        layer_fn=layer_fn,
                                        base_channels=base_channels,
                                        channel_multiplier=channel_multiplier,
-                                       kernels=[7, 7, 7, 7, 7, 5, 4],
-                                       strides=[2, 2, 1, 2, 1, 2, 1],
+                                       kernels=kernels[0:-1],
+                                       strides=strides[0:-1],
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=norm_first_layer,
                                        norm_last_layer=True)
-
         # the final projection
         final_normalization_str = normalization_str if norm_last_layer else "none"
-        self.final_conv = add_normalization(nn.Conv2d(output_chans, output_chans, 1),
+        self.final_conv = add_normalization(nn.ConvTranspose2d(final_chans, output_chans,
+                                                               kernels[-1], stride=strides[-1]),
                                             normalization_str=final_normalization_str,
                                             nfeatures=output_chans, ndims=2,
                                             num_groups=_compute_group_norm_planes(output_chans))
@@ -2704,13 +2730,16 @@ class Conv256Decoder(nn.Module):
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
 
         # The main model
+        kernels = [7, 7, 7, 7, 7, 5, 5, 4]
+        strides = [2, 2, 1, 2, 1, 2, 2, 1]
+        final_chans = int(base_channels * (channel_multiplier ** (len(kernels) - 2)))
         self.model = _build_conv_stack(input_chans=input_size,
-                                       output_chans=output_chans,
+                                       output_chans=final_chans,
                                        layer_fn=layer_fn,
                                        base_channels=base_channels,
                                        channel_multiplier=channel_multiplier,
-                                       kernels=[7, 7, 7, 7, 7, 5, 5, 4],
-                                       strides=[2, 2, 1, 2, 1, 2, 2, 1],
+                                       kernels=kernels[0:-1],
+                                       strides=strides[0:-1],
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=norm_first_layer,
@@ -2718,7 +2747,8 @@ class Conv256Decoder(nn.Module):
 
         # the final projection
         final_normalization_str = normalization_str if norm_last_layer else "none"
-        self.final_conv = add_normalization(nn.Conv2d(output_chans, output_chans, 1),
+        self.final_conv = add_normalization(nn.ConvTranspose2d(final_chans, output_chans,
+                                                               kernels[-1], stride=strides[-1]),
                                             normalization_str=final_normalization_str,
                                             nfeatures=output_chans, ndims=2,
                                             num_groups=_compute_group_norm_planes(output_chans))
@@ -3187,13 +3217,16 @@ class Conv28Encoder(nn.Module):
         assert isinstance(output_size, (float, int)), "Expect output_size as float or int."
 
         # The main model
+        kernels = [3, 4, 4, 4, 1]
+        strides = [1, 2, 2, 2, 1]
+        final_chans = int(base_channels * (channel_multiplier ** (len(kernels) - 2)))
         self.model = _build_conv_stack(input_chans=input_chans,
-                                       output_chans=output_size,
+                                       output_chans=final_chans,
                                        layer_fn=layer_fn,
                                        base_channels=base_channels,
                                        channel_multiplier=channel_multiplier,
-                                       kernels=[3, 4, 4, 4, 1],
-                                       strides=[1, 2, 2, 2, 1],
+                                       kernels=kernels[0:-1],
+                                       strides=strides[0:-1],
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=False,  # dont norm inputs
@@ -3201,7 +3234,7 @@ class Conv28Encoder(nn.Module):
 
         # the final projection
         final_normalization_str = normalization_str if norm_last_layer else "none"
-        self.final_conv = add_normalization(nn.Conv2d(output_size, output_size, 1),
+        self.final_conv = add_normalization(nn.Conv2d(final_chans, output_size, kernels[-1], stride=strides[-1]),
                                             normalization_str=final_normalization_str,
                                             nfeatures=output_size, ndims=2,
                                             num_groups=_compute_group_norm_planes(output_size))
@@ -3220,16 +3253,19 @@ class Conv32Encoder(nn.Module):
         assert isinstance(output_size, (float, int)), "Expect output_size as float or int."
 
         # The main model
+        kernels = [4, 4, 3, 3, 3]
+        strides = [2, 1, 2, 1, 1]
+        # TODO(jramapuram): consider this
+        # kernels = [3, 4, 4, 3, 3, 3]
+        # strides = [1, 2, 1, 2, 1, 1]
+        final_chans = int(base_channels * (channel_multiplier ** (len(kernels) - 2)))
         self.model = _build_conv_stack(input_chans=input_chans,
-                                       output_chans=output_size,
+                                       output_chans=final_chans,
                                        layer_fn=layer_fn,
                                        base_channels=base_channels,
                                        channel_multiplier=channel_multiplier,
-                                       # TODO(jramapuram): consider this
-                                       # kernels=[3, 4, 4, 3, 3, 3],
-                                       # strides=[1, 2, 1, 2, 1, 1],
-                                       kernels=[4, 4, 3, 3, 3],
-                                       strides=[2, 1, 2, 1, 1],
+                                       kernels=kernels[0:-1],
+                                       strides=strides[0:-1],
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=False,  # dont norm inputs
@@ -3237,7 +3273,7 @@ class Conv32Encoder(nn.Module):
 
         # the final projection
         final_normalization_str = normalization_str if norm_last_layer else "none"
-        self.final_conv = add_normalization(nn.Conv2d(output_size, output_size, 1),
+        self.final_conv = add_normalization(nn.Conv2d(final_chans, output_size, kernels[-1], stride=strides[-1]),
                                             normalization_str=final_normalization_str,
                                             nfeatures=output_size, ndims=2,
                                             num_groups=_compute_group_norm_planes(output_size))
@@ -3256,13 +3292,16 @@ class Conv64Encoder(nn.Module):
         assert isinstance(output_size, (float, int)), "Expect output_size as float or int."
 
         # The main model
+        kernels = [5, 4, 4, 3, 3, 3, 2]
+        strides = [2, 1, 2, 1, 2, 1, 1]
+        final_chans = int(base_channels * (channel_multiplier ** (len(kernels) - 2)))
         self.model = _build_conv_stack(input_chans=input_chans,
-                                       output_chans=output_size,
+                                       output_chans=final_chans,
                                        layer_fn=layer_fn,
                                        base_channels=base_channels,
                                        channel_multiplier=channel_multiplier,
-                                       kernels=[5, 4, 4, 3, 3, 3, 2],
-                                       strides=[2, 1, 2, 1, 2, 1, 1],
+                                       kernels=kernels[0:-1],
+                                       strides=strides[0:-1],
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=False,  # dont norm inputs
@@ -3270,7 +3309,7 @@ class Conv64Encoder(nn.Module):
 
         # the final projection
         final_normalization_str = normalization_str if norm_last_layer else "none"
-        self.final_conv = add_normalization(nn.Conv2d(output_size, output_size, 1),
+        self.final_conv = add_normalization(nn.Conv2d(final_chans, output_size, kernels[-1], stride=strides[-1]),
                                             normalization_str=final_normalization_str,
                                             nfeatures=output_size, ndims=2,
                                             num_groups=_compute_group_norm_planes(output_size))
@@ -3289,13 +3328,16 @@ class Conv128Encoder(nn.Module):
         assert isinstance(output_size, (float, int)), "Expect output_size as float or int."
 
         # The main model
+        kernels = [7, 5, 4, 4, 3, 3, 3, 2]
+        strides = [2, 2, 1, 2, 1, 2, 1, 1]
+        final_chans = int(base_channels * (channel_multiplier ** (len(kernels) - 2)))
         self.model = _build_conv_stack(input_chans=input_chans,
-                                       output_chans=output_size,
+                                       output_chans=final_chans,
                                        layer_fn=layer_fn,
                                        base_channels=base_channels,
                                        channel_multiplier=channel_multiplier,
-                                       kernels=[7, 5, 4, 4, 3, 3, 3, 2],
-                                       strides=[2, 2, 1, 2, 1, 2, 1, 1],
+                                       kernels=kernels[0:-1],
+                                       strides=strides[0:-1],
                                        activation_str=activation_str,
                                        normalization_str=normalization_str,
                                        norm_first_layer=False,  # dont norm inputs
@@ -3303,7 +3345,7 @@ class Conv128Encoder(nn.Module):
 
         # the final projection
         final_normalization_str = normalization_str if norm_last_layer else "none"
-        self.final_conv = add_normalization(nn.Conv2d(output_size, output_size, 1),
+        self.final_conv = add_normalization(nn.Conv2d(final_chans, output_size, kernels[-1], stride=strides[-1]),
                                             normalization_str=final_normalization_str,
                                             nfeatures=output_size, ndims=2,
                                             num_groups=_compute_group_norm_planes(output_size))
