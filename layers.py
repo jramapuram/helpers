@@ -75,9 +75,7 @@ class OnePlus(nn.Module):
 class Swish(nn.Module):
     def __init__(self, beta=1, trainable_beta=False):
         super(Swish, self).__init__()
-        self.beta = torch.zeros(1) + beta
-        if trainable_beta:
-            self.beta = self.beta.requires_grad_()
+        self.beta = nn.Parameter(torch.zeros(1) + beta, requires_grad=trainable_beta)
 
     def forward(self, x):
         return x * torch.sigmoid(self.beta * x)
@@ -2129,7 +2127,7 @@ class Resnet28Decoder(nn.Module):
         )
 
         # The main model
-        final_resblock_chans = int(base_channels * (channel_multiplier ** 3))
+        final_resblock_chans = int(base_channels * (channel_multiplier ** 2))
         self.model = _build_resnet_stack(input_chans=input_size,
                                          output_chans=final_resblock_chans,
                                          layer_fn=conv_layer_fn,
@@ -2620,8 +2618,8 @@ class Conv28Decoder(nn.Module):
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
 
         # The main model
-        kernels = [4, 4, 4, 4, 1]
-        strides = [1, 2, 1, 2, 1]
+        kernels = [4, 4, 4, 4]
+        strides = [1, 2, 1, 2]
         final_chans = int(base_channels * (channel_multiplier ** (len(kernels) - 2)))
         self.model = _build_conv_stack(input_chans=input_size,
                                        output_chans=final_chans,
@@ -2651,7 +2649,7 @@ class Conv28Decoder(nn.Module):
         outputs = self.model(images)
         outputs = self.final_conv(outputs)
         if upsample_last:
-            return F.upsample(outputs, size=(64, 64),
+            return F.upsample(outputs, size=(28, 28),
                               mode='bilinear',
                               align_corners=True)
         return outputs
@@ -2834,7 +2832,7 @@ class Conv256Decoder(nn.Module):
         outputs = self.model(images)
         outputs = self.final_conv(outputs)
         if upsample_last:
-            return F.upsample(outputs, size=(128, 128),
+            return F.upsample(outputs, size=(256, 256),
                               mode='bilinear',
                               align_corners=True)
         return outputs
@@ -3282,6 +3280,78 @@ class TorchvisionEncoder(nn.Module):
         return self.fc(outputs.squeeze())
 
 
+class Conv8Encoder(nn.Module):
+    def __init__(self, input_chans, output_size, base_channels=32, channel_multiplier=2,
+                 activation_str="relu", normalization_str="none", norm_last_layer=False,
+                 layer_fn=nn.Conv2d):
+        super(Conv8Encoder, self).__init__()
+        assert isinstance(output_size, (float, int)), "Expect output_size as float or int."
+
+        # The main model
+        kernels = [3, 3]
+        strides = [2, 2]
+        final_chans = int(base_channels * (channel_multiplier ** (len(kernels) - 2)))
+        self.model = _build_conv_stack(input_chans=input_chans,
+                                       output_chans=final_chans,
+                                       layer_fn=layer_fn,
+                                       base_channels=base_channels,
+                                       channel_multiplier=channel_multiplier,
+                                       kernels=kernels[0:-1],
+                                       strides=strides[0:-1],
+                                       activation_str=activation_str,
+                                       normalization_str=normalization_str,
+                                       norm_first_layer=False,  # dont norm inputs
+                                       norm_last_layer=True)
+
+        # the final projection
+        final_normalization_str = normalization_str if norm_last_layer else "none"
+        self.final_conv = add_normalization(nn.Conv2d(final_chans, output_size, kernels[-1], stride=strides[-1]),
+                                            normalization_str=final_normalization_str,
+                                            nfeatures=output_size, ndims=2,
+                                            num_groups=_compute_group_norm_planes(output_size))
+
+    def forward(self, images):
+        """Iterate over each of the layers to produce an output."""
+        assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
+        return self.final_conv(self.model(images))
+
+
+class Conv16Encoder(nn.Module):
+    def __init__(self, input_chans, output_size, base_channels=32, channel_multiplier=2,
+                 activation_str="relu", normalization_str="none", norm_last_layer=False,
+                 layer_fn=nn.Conv2d):
+        super(Conv16Encoder, self).__init__()
+        assert isinstance(output_size, (float, int)), "Expect output_size as float or int."
+
+        # The main model
+        kernels = [4, 4, 3, 2]
+        strides = [2, 1, 1, 1]
+        final_chans = int(base_channels * (channel_multiplier ** (len(kernels) - 2)))
+        self.model = _build_conv_stack(input_chans=input_chans,
+                                       output_chans=final_chans,
+                                       layer_fn=layer_fn,
+                                       base_channels=base_channels,
+                                       channel_multiplier=channel_multiplier,
+                                       kernels=kernels[0:-1],
+                                       strides=strides[0:-1],
+                                       activation_str=activation_str,
+                                       normalization_str=normalization_str,
+                                       norm_first_layer=False,  # dont norm inputs
+                                       norm_last_layer=True)
+
+        # the final projection
+        final_normalization_str = normalization_str if norm_last_layer else "none"
+        self.final_conv = add_normalization(nn.Conv2d(final_chans, output_size, kernels[-1], stride=strides[-1]),
+                                            normalization_str=final_normalization_str,
+                                            nfeatures=output_size, ndims=2,
+                                            num_groups=_compute_group_norm_planes(output_size))
+
+    def forward(self, images):
+        """Iterate over each of the layers to produce an output."""
+        assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
+        return self.final_conv(self.model(images))
+
+
 class Conv28Encoder(nn.Module):
     def __init__(self, input_chans, output_size, base_channels=32, channel_multiplier=2,
                  activation_str="relu", normalization_str="none", norm_last_layer=False,
@@ -3290,8 +3360,8 @@ class Conv28Encoder(nn.Module):
         assert isinstance(output_size, (float, int)), "Expect output_size as float or int."
 
         # The main model
-        kernels = [3, 4, 4, 4, 1]
-        strides = [1, 2, 2, 2, 1]
+        kernels = [3, 4, 4, 4]
+        strides = [1, 2, 2, 2]
         final_chans = int(base_channels * (channel_multiplier ** (len(kernels) - 2)))
         self.model = _build_conv_stack(input_chans=input_chans,
                                        output_chans=final_chans,
@@ -3760,6 +3830,8 @@ def get_conv_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
         64: Conv64Encoder,
         32: Conv32Encoder,
         28: Conv28Encoder,
+        16: Conv16Encoder,
+        8: Conv8Encoder,
     }
     chans, image_size = input_shape[0], input_shape[-1]
 
