@@ -164,8 +164,7 @@ class SineConv2d(nn.Module):
         self.net = layer_type(in_channels, out_channels, kernel_size, stride=stride,
                               padding=padding, dilation=dilation, groups=groups,
                               bias=bias, padding_mode=padding_mode)
-        self.omega_0 = float(os.environ.get('OMEGA', 10))
-        print('using omega = {}'.format(self.omega_0))
+        self.omega_0 = omega_0
         self.is_first = is_first
         self.in_features = self.net.weight.size(1)
         self.out_features = self.net.weight.size(0)
