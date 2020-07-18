@@ -682,7 +682,7 @@ def get_name(args):
                            .replace('celeba', 'CA')
                            .replace('l2msssim', 'l2M')
                            .replace('evonorm', 'en')
-                           .replace('spectral_norm', 'sn')
+                           .replace('spectralnorm', 'sn')
                            .replace('class_conditioned', 'ccvae')
                            .replace('sync_batchnorm', 'sbn')
                            .replace('batchnorm', 'bn')
