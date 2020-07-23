@@ -3569,10 +3569,10 @@ class Dense(nn.Module):
                  norm_first_layer=False, norm_last_layer=False,
                  layer_fn=nn.Linear):
         super(Dense, self).__init__()
-        input_shape = [input_shape] if not isinstance(input_shape, (list, tuple)) else input_shape
-        output_shape = [output_shape] if not isinstance(output_shape, (list, tuple)) else output_shape
-        input_size = int(np.prod(input_shape))
-        output_size = int(np.prod(output_shape))
+        self.input_shape = [input_shape] if not isinstance(input_shape, (list, tuple)) else input_shape
+        self.output_shape = [output_shape] if not isinstance(output_shape, (list, tuple)) else output_shape
+        input_size = int(np.prod(self.input_shape))
+        output_size = int(np.prod(self.output_shape))
 
         # the views and model
         self.input_view = View([-1, input_size])
@@ -3588,9 +3588,19 @@ class Dense(nn.Module):
         self.output_view = View([-1, *output_shape])
 
     def forward(self, inputs):
+        batch_size, feature_size = inputs.shape[0], inputs.shape[-1]
+        assert feature_size == self.input_shape[-1], "feature size mismatch [{}] vs [{}]".format(
+            feature_size, self.input_shape[-1]
+        )
+
         h = self.input_view(inputs)
         h = self.model(h)
-        return self.output_view(h)
+        h = self.output_view(h)
+
+        assert h.shape[0] == inputs.shape[0], "batch size was expanded from {} to {} --> probably a bug.".format(
+            batch_size, h.shape[0]
+        )
+        return h
 
 
 class DenseEncoder(Dense):
