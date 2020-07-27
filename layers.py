@@ -2609,6 +2609,123 @@ class Resnet1024Decoder(nn.Module):
         return outputs
 
 
+class Conv4Decoder(nn.Module):
+    def __init__(self, input_size, output_chans, base_channels=1024, channel_multiplier=0.5,
+                 activation_str="relu", normalization_str="none", norm_first_layer=False,
+                 norm_last_layer=False, layer_fn=nn.ConvTranspose2d):
+        super(Conv4Decoder, self).__init__()
+        assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
+
+        # the final projection
+        final_normalization_str = normalization_str if norm_last_layer else "none"
+        self.final_conv = add_normalization(nn.ConvTranspose2d(input_size, output_chans, 4, stride=2),
+                                            normalization_str=final_normalization_str,
+                                            nfeatures=output_chans, ndims=2,
+                                            num_groups=_compute_group_norm_planes(output_chans))
+
+    def forward(self, images, upsample_last: bool = False):
+        """Iterate over each of the layers to produce an output."""
+        if images.dim() == 2:
+            images = images.unsqueeze(-1).unsqueeze(-1)
+
+        outputs = self.final_conv(images)
+        if upsample_last:
+            return F.upsample(outputs, size=(4, 4),
+                              mode='bilinear',
+                              align_corners=True)
+        return outputs
+
+
+class Conv8Decoder(nn.Module):
+    def __init__(self, input_size, output_chans, base_channels=1024, channel_multiplier=0.5,
+                 activation_str="relu", normalization_str="none", norm_first_layer=False,
+                 norm_last_layer=False, layer_fn=nn.ConvTranspose2d):
+        super(Conv8Decoder, self).__init__()
+        assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
+
+        # The main model
+        kernels = [5, 4]
+        strides = [1, 1]
+        final_chans = int(base_channels * (channel_multiplier ** (len(kernels) - 2)))
+        self.model = _build_conv_stack(input_chans=input_size,
+                                       output_chans=final_chans,
+                                       layer_fn=layer_fn,
+                                       base_channels=base_channels,
+                                       channel_multiplier=channel_multiplier,
+                                       kernels=kernels[0:-1],
+                                       strides=strides[0:-1],
+                                       activation_str=activation_str,
+                                       normalization_str=normalization_str,
+                                       norm_first_layer=norm_first_layer,
+                                       norm_last_layer=True)
+
+        # the final projection
+        final_normalization_str = normalization_str if norm_last_layer else "none"
+        self.final_conv = add_normalization(nn.ConvTranspose2d(final_chans, output_chans,
+                                                               kernels[-1], stride=strides[-1]),
+                                            normalization_str=final_normalization_str,
+                                            nfeatures=output_chans, ndims=2,
+                                            num_groups=_compute_group_norm_planes(output_chans))
+
+    def forward(self, images, upsample_last: bool = False):
+        """Iterate over each of the layers to produce an output."""
+        if images.dim() == 2:
+            images = images.unsqueeze(-1).unsqueeze(-1)
+
+        outputs = self.model(images)
+        outputs = self.final_conv(outputs)
+        if upsample_last:
+            return F.upsample(outputs, size=(8, 8),
+                              mode='bilinear',
+                              align_corners=True)
+        return outputs
+
+
+class Conv16Decoder(nn.Module):
+    def __init__(self, input_size, output_chans, base_channels=1024, channel_multiplier=0.5,
+                 activation_str="relu", normalization_str="none", norm_first_layer=False,
+                 norm_last_layer=False, layer_fn=nn.ConvTranspose2d):
+        super(Conv16Decoder, self).__init__()
+        assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
+
+        # The main model
+        kernels = [5, 5, 4]
+        strides = [1, 2, 1]
+        final_chans = int(base_channels * (channel_multiplier ** (len(kernels) - 2)))
+        self.model = _build_conv_stack(input_chans=input_size,
+                                       output_chans=final_chans,
+                                       layer_fn=layer_fn,
+                                       base_channels=base_channels,
+                                       channel_multiplier=channel_multiplier,
+                                       kernels=kernels[0:-1],
+                                       strides=strides[0:-1],
+                                       activation_str=activation_str,
+                                       normalization_str=normalization_str,
+                                       norm_first_layer=norm_first_layer,
+                                       norm_last_layer=True)
+
+        # the final projection
+        final_normalization_str = normalization_str if norm_last_layer else "none"
+        self.final_conv = add_normalization(nn.ConvTranspose2d(final_chans, output_chans,
+                                                               kernels[-1], stride=strides[-1]),
+                                            normalization_str=final_normalization_str,
+                                            nfeatures=output_chans, ndims=2,
+                                            num_groups=_compute_group_norm_planes(output_chans))
+
+    def forward(self, images, upsample_last: bool = False):
+        """Iterate over each of the layers to produce an output."""
+        if images.dim() == 2:
+            images = images.unsqueeze(-1).unsqueeze(-1)
+
+        outputs = self.model(images)
+        outputs = self.final_conv(outputs)
+        if upsample_last:
+            return F.upsample(outputs, size=(16, 16),
+                              mode='bilinear',
+                              align_corners=True)
+        return outputs
+
+
 class Conv28Decoder(nn.Module):
     def __init__(self, input_size, output_chans, base_channels=1024, channel_multiplier=0.5,
                  activation_str="relu", normalization_str="none", norm_first_layer=False,
@@ -4225,6 +4342,9 @@ def get_conv_decoder(output_shape: Tuple[int, int, int],     # output image shap
         32: Conv32Decoder,
         # 32: Conv32UpsampleDecoder,
         28: Conv28Decoder,
+        16: Conv16Decoder,
+        8: Conv8Decoder,
+        4: Conv4Decoder,
     }
     image_size = output_shape[-1]
 

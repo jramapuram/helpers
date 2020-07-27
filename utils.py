@@ -153,6 +153,11 @@ def restore_files_from_dict_to_dir(source_dict, dest_dir: str, overwrite: bool =
         new_file_path.open(mode='w').write(v)
 
 
+def read_from_csv(filename):
+    """Simple helper to read a csv."""
+    return np.genfromtxt(filename, delimiter=',')
+
+
 def append_to_csv(data, filename):
     with open(filename, 'ab') as f:
         np.savetxt(f, data, delimiter=",")
