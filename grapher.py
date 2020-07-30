@@ -40,13 +40,17 @@ class Grapher:
             def wrapper(*args, **kwargs):
                 for subscriber_name, subscriber in six.iteritems(self.subscribers):
                     if hasattr(subscriber, attr):
-                        # Don't use async for pickling or if we are using tensorboard
+                        # Don't use async for specific fns or if we are using tensorboard
                         non_async_fns = ['pickle_data', 'close', 'reconnect_and_replay_log', '__init__', '_connect']
                         if attr not in non_async_fns and 'tensorboard' not in subscriber_name:
                             fn = partial(getattr(subscriber, attr), *args, **kwargs)
                             asyncio.get_event_loop().run_in_executor(None, fn)
                         else:
                             getattr(subscriber, attr)(*args, **kwargs)
+                    elif 'sync' in attr and hasattr(subscriber, attr.replace('sync_', '')):
+                        # Special logic if we want to force sync functions. eg: grapher.sync_add_scalar()
+                        fn_name = attr.replace('sync_', '')
+                        getattr(subscriber, fn_name)(*args, **kwargs)
 
             return wrapper
         raise AttributeError
