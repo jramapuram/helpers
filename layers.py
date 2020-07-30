@@ -219,6 +219,8 @@ class SineLinear(nn.Module):
         self.linear = nn.Linear(in_features, out_features, bias=bias)
         self.init_weights()  # do the sine init
 
+        self.weight = self.linear.weight
+
     def init_weights(self):
         with torch.no_grad():
             if self.is_first:
