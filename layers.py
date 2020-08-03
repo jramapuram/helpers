@@ -159,13 +159,11 @@ class SineConv2d(nn.Module):
     """Conv2d +sine activation layer."""
     def __init__(self, in_channels, out_channels, kernel_size, stride=1,
                  padding=0, dilation=1, groups=1, bias=True, padding_mode='zeros',
-                 omega_0=10, is_first=False, layer_type=nn.Conv2d):
+                 layer_type=nn.Conv2d):
         super(SineConv2d, self).__init__()
         self.net = layer_type(in_channels, out_channels, kernel_size, stride=stride,
                               padding=padding, dilation=dilation, groups=groups,
                               bias=bias, padding_mode=padding_mode)
-        self.omega_0 = omega_0
-        self.is_first = is_first
         self.in_features = self.net.weight.size(1)
         self.out_features = self.net.weight.size(0)
         self.init_weights()
@@ -173,24 +171,20 @@ class SineConv2d(nn.Module):
 
     def init_weights(self):
         with torch.no_grad():
-            if self.is_first:
-                nn.init.xavier_uniform_(self.net.weight, gain=1.)
-            else:
-                nn.init.xavier_uniform_(self.net.weight, gain=1.0/self.omega_0)
+            nn.init.xavier_uniform_(self.net.weight, gain=1.0)
 
     def extra_repr(self):
-        return 'is_first={is_first}, omega_0={omega_0}, in_features={in_features}, ' \
-            'out_features={out_features}'.format(**self.__dict__)
+        return 'in_features={in_features}, out_features={out_features}'.format(**self.__dict__)
 
     def forward(self, x):
-        return torch.sin(self.omega_0 * self.net(x))
+        return torch.sin(self.net(x))
 
 
 class SineConvTranspose2d(SineConv2d):
     """Conv2dTranspose +sine activation layer."""
     def __init__(self, in_channels, out_channels, kernel_size, stride=1,
                  padding=0, output_padding=0, dilation=1, groups=1, bias=True, padding_mode='zeros',
-                 omega_0=30, is_first=False, layer_type=nn.ConvTranspose2d):
+                 layer_type=nn.ConvTranspose2d):
         layer_fn = functools.partial(layer_type, output_padding=output_padding)
         super(SineConvTranspose2d, self).__init__(in_channels=in_channels,
                                                   out_channels=out_channels,
@@ -201,18 +195,13 @@ class SineConvTranspose2d(SineConv2d):
                                                   groups=groups,
                                                   bias=bias,
                                                   padding_mode=padding_mode,
-                                                  omega_0=omega_0,
-                                                  is_first=is_first,
                                                   layer_type=layer_fn)
 
 
 class SineLinear(nn.Module):
     """Linear layer + sine activation. Sourced from https://bit.ly/31vGaE8"""
-    def __init__(self, in_features, out_features, bias=True,
-                 omega_0=30, is_first=False, layer_type=nn.Linear):
+    def __init__(self, in_features, out_features, bias=True, layer_type=nn.Linear):
         super(SineLinear, self).__init__()
-        self.omega_0 = omega_0
-        self.is_first = is_first
         self.in_features = in_features
 
         # the underlying network
@@ -223,22 +212,18 @@ class SineLinear(nn.Module):
 
     def init_weights(self):
         with torch.no_grad():
-            if self.is_first:
-                self.linear.weight.uniform_(-1 / self.in_features,
-                                            1 / self.in_features)
-            else:
-                self.linear.weight.uniform_(-np.sqrt(6 / self.in_features) / self.omega_0,
-                                            np.sqrt(6 / self.in_features) / self.omega_0)
+            self.linear.weight.uniform_(-np.sqrt(6 / self.in_features),
+                                        np.sqrt(6 / self.in_features))
 
     def extra_repr(self):
-        return 'is_first={is_first}, omega_0={omega_0}, in_features={in_features}'.format(**self.__dict__)
+        return 'in_features={in_features}'.format(**self.__dict__)
 
     def forward(self, input):
-        return torch.sin(self.omega_0 * self.linear(input))
+        return torch.sin(self.linear(input))
 
     def forward_with_intermediate(self, input):
         # For visualization of activation distributions
-        intermediate = self.omega_0 * self.linear(input)
+        intermediate = self.linear(input)
         return torch.sin(intermediate), intermediate
 
 
@@ -1930,12 +1915,8 @@ def _build_conv_stack(input_chans, output_chans,
             norm_fn = functools.partial(norm_fn, normalization_str=normalization_str)
 
         # special logic for sine-layers
-        layer_fn_i = layer_fn
-        if idx == 0 and 'sine' in str(layer_fn).lower():
-            layer_fn_i = functools.partial(layer_fn, is_first=True)
-
         li_gn_groups = {'num_groups': _compute_group_norm_planes(chan_out)}
-        layer_i = norm_fn(layer_fn_i(chan_in, chan_out, kernel_size=k, stride=s),
+        layer_i = norm_fn(layer_fn(chan_in, chan_out, kernel_size=k, stride=s),
                           nfeatures=chan_out, **li_gn_groups)
         layers.append(layer_i)
 
@@ -3662,12 +3643,8 @@ def _build_dense(input_size,
         final_norm_layer = norm_fn(final_norm_layer, nfeatures=output_size)
 
     # special logic for sine-layers
-    layer_name = str(layer_fn).lower()
-    init_layer_fn = functools.partial(layer_fn, is_first=True) \
-        if 'sine' in layer_name else layer_fn
-
     layers = [('init_norm', init_norm_layer),
-              ('l0', norm_fn(init_layer_fn(input_size, latent_size), nfeatures=latent_size)),
+              ('l0', norm_fn(layer_fn(input_size, latent_size), nfeatures=latent_size)),
               ('act0', activation_fn())]
 
     for i in range(num_layers - 2):  # 2 for init layer[above] + final layer[below]
