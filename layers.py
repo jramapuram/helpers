@@ -1,4 +1,5 @@
 import os
+import sys
 import pickle
 import tempfile
 import torch
@@ -369,16 +370,18 @@ class Upsample(nn.Module):
 
 
 class EMA(nn.Module):
-    def __init__(self, decay=0.999):
+    def __init__(self, decay=0.999, stop_grad=True):
         """ Simple helper to keep track of exponential moving mean and variance.
 
         :param decay: the decay, default is decent.
+        :param stop_grad: stop gradients through EMA op.
         :returns: EMA module
         :rtype: nn.Module
 
         """
         super(EMA, self).__init__()
         self.decay = decay
+        self.stop_grad = stop_grad
         self.register_buffer('ema_val', None)  # running mean
         self.register_buffer('ema_var', None)  # running variance
 
@@ -405,10 +408,11 @@ class EMA(nn.Module):
             self.ema_var = torch.zeros_like(x)
 
         if self.training:  # only update the values if we are in a training state.
-            self.ema_val = (1 - self.decay) * x.detach() + self.decay * self.ema_val
+            inputs = x.detach() if self.stop_grad else x
+            self.ema_val = (1 - self.decay) * inputs + self.decay * self.ema_val.detach()
             # self.ema_var = (1 - self.decay) * (self.ema_var + self.decay * self.ema_val**2)
-            variance = (x.detach() - self.ema_val) ** 2
-            self.ema_var = (1 - self.decay) * variance + self.decay * self.ema_var
+            variance = (inputs - self.ema_val) ** 2
+            self.ema_var = (1 - self.decay) * variance + self.decay * self.ema_var.detach()
 
         return x
 
@@ -833,109 +837,81 @@ class GatedDense(nn.Module):
         return h * g
 
 
-class RNNImageClassifier(nn.Module):
-    def __init__(self, input_shape, output_size, latent_size=256,
-                 n_layers=2, bidirectional=False, rnn_type="lstm",
-                 conv_normalization_str="none",
-                 dense_normalization_str="none",
-                 bias=True, dropout=0,
-                 cuda=False, half=False):
-        super(RNNImageClassifier, self).__init__()
-        self.cuda = cuda
-        self.half = half
-        self.input_shape = input_shape
-        self.latent_size = latent_size
-        self.output_size = output_size
-        self.n_layers = n_layers
-        self.rnn_type = rnn_type
-        self.chans = input_shape[0]
-        self.bidirectional = bidirectional
+class RNN(nn.Module):
+    """Simple RNN wrapper, can use LSTM or GRU."""
 
-        # build the models
-        self.feature_extractor = nn.Sequential(
-            get_encoder(input_shape, encoder_layer_type='conv',
-                        conv_normalization=conv_normalization_str)(output_size=latent_size),
-            nn.SELU()
-        )
-        self.rnn = self._build_rnn(latent_size, bias=bias, dropout=dropout)
-        self.output_projector = _build_dense(input_size=latent_size,
-                                             output_size=output_size,
-                                             normalization_str=dense_normalization_str)
+    def __init__(self, input_size, hidden_size, output_size,
+                 num_layers, batch_first=False,
+                 bidirectional=False, rnn_type='lstm'):
+        """RNN module. Can be LSTM or GRU.
+
+        :param input_size: input size to RNN
+        :param hidden_size: latent size
+        :param output_size: output projection size
+        :param num_layers: number of RNN layers
+        :param batch_first: if true uses [B, T, F] instead of [T, B, F]
+        :param bidirectional: bidirectional?
+        :param rnn_type: lstm or gru
+        :returns: RNN module
+        :rtype: nn.Module
+
+        """
+        super(RNN, self).__init__()
+        self.rnn_type = rnn_type
+        self.nlayers = num_layers
+        self.nhid = hidden_size
         self.state = None
 
-    def _build_rnn(self, latent_size, model_type='lstm', bias=True, dropout=False):
-        if self.half:
-            import apex
+        # Build the underlying rnn
+        rnn_fn_map = {'lstm': nn.LSTM, 'gru': nn.GRU}
+        self.rnn = rnn_fn_map[rnn_type](input_size=input_size,
+                                        hidden_size=hidden_size,
+                                        num_layers=num_layers,
+                                        batch_first=batch_first,
+                                        bidirectional=bidirectional)
 
-        model_fn_map = {
-            'gru': torch.nn.GRU if not self.half else apex.RNN.GRU,
-            'lstm': torch.nn.LSTM if not self.half else apex.RNN.LSTM,
-        }
-        rnn = model_fn_map[model_type](
-            input_size=latent_size,
-            hidden_size=latent_size,
-            num_layers=self.n_layers,
-            batch_first=True,
-            bidirectional=self.bidirectional,
-            bias=bias, dropout=dropout
+        # Linear projection
+        self.num_directions = 2 if bidirectional else 1
+        self.lin = nn.Sequential(
+            nn.Linear(self.num_directions*hidden_size, output_size)
         )
 
-        if self.cuda and not self.half:
-            rnn.flatten_parameters()
+    def init_hidden(self, batch_size):
+        """Helper to reset the h of LSTM or GRU."""
+        weight = next(self.parameters()).data
+        if self.rnn_type == 'lstm':
+            # h_0 and c_0 of shape (num_layers * num_directions, batch, hidden_size)
+            return (weight.new(self.nlayers*self.num_directions, batch_size, self.nhid).zero_(),
+                    weight.new(self.nlayers*self.num_directions, batch_size, self.nhid).zero_())
+        else:
+            return weight.new(self.nlayers*self.num_directions, batch_size, self.nhid).zero_()
 
-        return rnn
+    def _extract_h(self, state):
+        if self.rnn_type == 'lstm':
+            return state[0]  # always return h for lstm
 
-    def forward_rnn(self, x, reset_state=False, return_outputs=False):
-        if self.state is None or reset_state:
-            self.state = init_state(n_layers=self.n_layers,
-                                    batch_size=x.size(0),
-                                    hidden_size=self.latent_size,
-                                    rnn_type=self.rnn_type,
-                                    bidirectional=self.bidirectional,
-                                    half=self.half, cuda=self.cuda)
+        return state  # GRU, etc doesnt have (h, c)
 
-        features = self.feature_extractor(x)
-        if features.dim() < 3:
-            features = features.unsqueeze(1)
+    def forward(self, inputs, state=None, project_outputs_with_state=False):
+        """Forward pass the RNN-->Linear model
 
-        outputs, self.state = self.rnn(features, self.state)
-        return outputs if return_outputs else None
+        :param inputs: [T, B, F]
+        :param state: (optional) state for RNN, can be created with init_hidden
+        :param project_outputs_with_state: if true projects state instead of outputs with lin
+        :returns: outputs either [T, B, output_size] or [B, output_size] based on project_outputs_with_state
+        :rtype: torch.Tensor
 
-    def forward_prediction(self, reduce_mean=True):
-        ''' predicts from the state, but first does a reduce over n_layers [ind 0]'''
-        reduce_fn = torch.mean if reduce_mean else torch.sum
-        state = self.state[0] if self.rnn_type == 'lstm' else self.state
-        return self.output_projector(reduce_fn(state, 0))
+        """
+        assert inputs.dim() == 3, "Inputs should be [T, B, F]"
+        batch_size = inputs.shape[1]
+        self.state = self.init_hidden(batch_size) if state is None else state
+        outputs, self.state = self.rnn(inputs, self.state)
 
-    def forward(self, x, reset_state=False, reduce_mean=True):
-        ''' helper that does forward rnn and forward prediction '''
-        _ = self.forward_rnn(x, reset_state, return_outputs=False)
-        return self.forward_prediction(reduce_mean=reduce_mean)
+        # project the state through the linear model instead of the outputs
+        if project_outputs_with_state:
+            return self.lin(self._extract_h(state))
 
-
-def init_state(n_layers, batch_size, hidden_size, rnn_type='lstm',
-               bidirectional=False, noisy=False, half=False, cuda=False):
-    ''' return a single initialized state'''
-    def _init_state():
-        num_directions = 2 if bidirectional else 1
-        if noisy:
-            # nn.init.xavier_uniform_(
-            return same_type(half, cuda)(
-                num_directions * n_layers, batch_size, hidden_size
-            ).normal_(0, 0.01).requires_grad_(),
-
-        # return zeros if not a noisy state
-        return same_type(half, cuda)(
-            num_directions * n_layers, batch_size, hidden_size
-        ).zero_().requires_grad_()
-
-    if rnn_type == 'lstm':
-        return (  # LSTM state is (h, c)
-            _init_state(),
-            _init_state()
-        )
-
-    return _init_state()
+        return self.lin(outputs)
 
 
 class ModelSaver(object):
@@ -1381,8 +1357,9 @@ class LinearWarmupWithFixedInterval(nn.Module):
         return update
 
 
-class DenseResnet(nn.Module):
-    def __init__(self, input_size, output_size, normalization_str="none", activation_fn=nn.ReLU):
+class BasicDenseBlock(nn.Module):
+    def __init__(self, input_size, output_size, layer_fn=nn.Linear,
+                 normalization_str="none", activation_str='relu'):
         """ Resnet, but with dense layers
 
         :param input_size: the input size
@@ -1393,12 +1370,14 @@ class DenseResnet(nn.Module):
         :rtype: nn.Module
 
         """
-        super(DenseResnet, self).__init__()
-        self.dense1 = add_normalization(nn.Linear(input_size, output_size), normalization_str, 1, output_size)
-        self.dense2 = add_normalization(nn.Linear(output_size, output_size), normalization_str, 1, output_size)
-        self.downsampler = add_normalization(nn.Linear(input_size, output_size),
-                                             normalization_str, 1, output_size)
-        self.act = activation_fn()
+        super(BasicDenseBlock, self).__init__()
+        self.dense1 = add_normalization(layer_fn(input_size, output_size), normalization_str, 1, output_size)
+        self.dense2 = add_normalization(layer_fn(output_size, output_size), normalization_str, 1, output_size)
+        self.act = str_to_activ_module(activation_str)()
+
+        self.resampler = None
+        if input_size != output_size:
+            self.resampler = nn.Linear(input_size, output_size)
 
     def forward(self, x):
         batch_size = x.shape[0]
@@ -1407,9 +1386,11 @@ class DenseResnet(nn.Module):
         out = self.dense2(out)
 
         # add residual part and return
-        residual = self.downsampler(x)
-        out += residual
-        return self.act(out)
+        if self.resampler is not None:
+            x = self.resampler(x)
+
+        out += x
+        return out
 
 
 class TransformerEncoder(nn.Module):
@@ -4705,6 +4686,7 @@ def append_save_and_load_fns(model, optimizer, scheduler, grapher, args):
                 {**{
                     'model': model.state_dict(),
                     'code': code,
+                    'command': 'python ' + " ".join(sys.argv),
                     'optimizer': optimizer.state_dict(),
                     'scheduler': scheduler.state_dict(),
                     'args': args,
