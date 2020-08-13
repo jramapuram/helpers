@@ -11,7 +11,7 @@ import numpy as np
 
 from copy import deepcopy
 from torchvision import models
-from typing import Tuple, Union, Optional
+from typing import Tuple, Union, Optional, List
 from collections import OrderedDict
 
 from .s3d import S3D
@@ -618,32 +618,68 @@ class CoordConvTranspose(nn.Module):
         return self.conv_tr_layer(x)
 
 
-class BatchGroupNorm(nn.Module):
-    def __init__(self, num_groups, num_features):
-        """ Batch version of groupnorm, flattens everything to batch and then operates over channels like usual.
+class BatchedGroupNorm(nn.Module):
+    """Simple extension of GN to a batched version; wrap with jit.trace()"""
 
-        :param num_groups: number of groups to use with batch groupnorm
-        :param num_features: number of features in batch groupnorm
-        :returns: groupnormed tensor
-        :rtype: torch.Tensor
-
-        """
-        super(BatchGroupNorm, self).__init__()
-        self.gn = nn.GroupNorm(num_groups, num_features)
+    def __init__(self, num_groups, num_channels, eps: float = 1e-5, affine: bool = True):
+        super(BatchedGroupNorm, self).__init__()
+        self.gn = nn.GroupNorm(num_groups, num_channels, eps=eps, affine=affine)
 
     def __repr__(self):
-        return 'Batch' + self.gn.__repr__()
+        return 'Batched' + self.gn.__repr__()
 
-    def forward(self, x):
-        assert len(x.shape) == 5, "batchGroupNorm expects a 5d [{}] tensor".format(x.shape)
-        b_i, b_j, c, h, w = x.shape
-        out = self.gn(x.contiguous().view(b_i * b_j, c, h, w))
-        return out.view([b_i, b_j] + list(out.shape[1:]))
+    def forward(self, input: torch.Tensor):
+        assert len(input.shape) == 5, "BatchedGroupNorm expects a 5d tensor, got [{}]".format(input.shape)
+        b_i, b_j, c, h, w = input.shape
+        out = torch.cat([self.gn(input[:, i, ::]).unsqueeze(1) for i in range(b_j)], 1)
+        return out
+
+
+class BatchedBatchNorm2d(nn.Module):
+    """Simple extension of BN2d to a batched set of inputs, [B_i, B_j, C, H, W]."""
+
+    def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True):
+        super(BatchedBatchNorm2d, self).__init__()
+        self.bn = nn.BatchNorm2d(num_features=num_features,
+                                 eps=eps,
+                                 momentum=momentum,
+                                 affine=affine,
+                                 track_running_stats=track_running_stats)
+
+    def __repr__(self):
+        return 'Batched' + self.bn.__repr__()
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        assert len(input.shape) == 5, "BatchedBatchNorm2d expects a 5d tensor, got [{}]".format(input.shape)
+        b_i, b_j, c, h, w = input.shape
+        out = torch.cat([self.bn(input[:, i, ::]).unsqueeze(1) for i in range(b_j)], 1)
+        return out
+
+class BatchedBatchNorm1d(nn.Module):
+    """Simple extension of BN1d to a batched set of inputs, [B_i, B_j, C]."""
+
+    def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True):
+        super(BatchedBatchNorm1d, self).__init__()
+        self.bn = nn.BatchNorm1d(num_features=num_features,
+                                 eps=eps,
+                                 momentum=momentum,
+                                 affine=affine,
+                                 track_running_stats=track_running_stats)
+
+    def __repr__(self):
+        return 'Batched' + self.bn.__repr__()
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        assert len(input.shape) == 3, "BatchedBatchNorm1d expects a 3d tensor, got [{}]".format(input.shape)
+        b_i, b_j, c = input.shape
+        out = torch.cat([self.bn(input[:, i, ::]).unsqueeze(1) for i in range(b_j)], 1)
+        return out
+
 
 
 class BatchConv2D(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size,
-                 stride=1, padding=0, dilation=1, groups=1, bias=True):
+                 stride=1, padding=0, dilation=1, groups=1, bias=True, padding_mode='zeros'):
         """ Batch convolve a set of inputs by groups in parallel. Similar to bmm.
 
         :param in_channels: (b_j, b_i, c_in, h, w) where b_j are the parallel convs to run
@@ -659,11 +695,12 @@ class BatchConv2D(nn.Module):
 
         """
         super(BatchConv2D, self).__init__()
+        self.groups = groups
         self.out_channels = out_channels
         self.conv = nn.Conv2d(in_channels*groups, out_channels*groups,
                               kernel_size, stride=stride,
                               padding=padding, dilation=dilation,
-                              groups=groups, bias=bias)
+                              groups=groups, bias=bias, padding_mode=padding_mode)
 
     def __repr__(self):
         return 'Batch' + self.conv.__repr__()
@@ -676,17 +713,20 @@ class BatchConv2D(nn.Module):
         :rtype: torch.Tensor
 
         """
-        assert len(x.shape) == 5, "batchconv2d expects a 5d [{}] tensor".format(x.shape)
+        assert len(x.shape) == 5, "batchconv2d expects a 5d tensor, got [{}]".format(x.shape)
         b_i, b_j, c, h, w = x.shape
         out = self.conv(x.permute([1, 0, 2, 3, 4]).contiguous().view(b_j, b_i * c, h, w))
         return out.view(b_j, b_i, self.out_channels,
                         out.shape[-2], out.shape[-1]).permute([1, 0, 2, 3, 4])
+        # out = self.conv(x.view(b_i, b_j * c, h, w))
+        # return out.view((b_i, b_j, self.out_channels, *out.shape[-2:])).contiguous()
+
 
 
 class BatchConvTranspose2D(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size,
                  stride=1, padding=0, output_padding=0, groups=1, bias=True,
-                 dilation=1):
+                 dilation=1, padding_mode='zeros'):
         """ Batch conv-transpose a set of inputs by groups in parallel. Similar to bmm.
 
         :param in_channels: (b_j, b_i, c_in, h, w) where b_j are the parallel convs to run
@@ -698,6 +738,7 @@ class BatchConvTranspose2D(nn.Module):
         :param groups: number of parallel ops
         :param bias: whether of not to include a bias term in the conv (bool)
         :param dilation: the filter dilation
+        :param padding_mode: the type of padding to use (default: zeros)
         :returns: tensor of (b_j, b_i, c_out, kh, kw) with batch convolve done
         :rtype: torch.Tensor
 
@@ -709,7 +750,8 @@ class BatchConvTranspose2D(nn.Module):
                                        padding=padding,
                                        output_padding=output_padding,
                                        groups=groups, bias=bias,
-                                       dilation=dilation)
+                                       dilation=dilation,
+                                       padding_mode=padding_mode)
 
     def __repr__(self):
         return 'Batch' + self.conv.__repr__()
@@ -722,11 +764,13 @@ class BatchConvTranspose2D(nn.Module):
         :rtype: torch.Tensor
 
         """
-        assert len(x.shape) == 5, "batchconv2d expects a 5d [{}] tensor".format(x.shape)
+        assert len(x.shape) == 5, "batchconv2d expects a 5d tensor, got [{}]".format(x.shape)
         b_i, b_j, c, h, w = x.shape
         out = self.conv(x.permute([1, 0, 2, 3, 4]).contiguous().view(b_j, b_i * c, h, w))
         return out.view(b_j, b_i, self.out_channels,
                         out.shape[-2], out.shape[-1]).permute([1, 0, 2, 3, 4])
+        # out = self.conv(x.view(b_i, b_j * c, h, w))
+        # return out.view((b_i, b_j, self.out_channels, *out.shape[-2:])).contiguous()
 
 
 class MaskedResUnit(nn.Module):
@@ -1708,9 +1752,6 @@ def add_normalization(module, normalization_str, ndims, nfeatures, **kwargs):
         'evonormb0': {
             2: lambda nfeatures, **kwargs: EvoNorm2D(nfeatures, version='B0'),
         },
-        'batch_groupnorm': {
-            2: lambda nfeatures, **kwargs: BatchGroupNorm(kwargs['num_groups'], nfeatures)
-        },
         'instancenorm': {
             1: lambda nfeatures, **kwargs: nn.Sequential(
                 View([-1, 1, nfeatures]),
@@ -2210,6 +2251,7 @@ class Resnet64Decoder(nn.Module):
         super(Resnet64Decoder, self).__init__()
         assert isinstance(input_size, (float, int)), "Expect input_size as float or int."
         self.act = str_to_activ_module(activation_str)
+        self.input_size = input_size
 
         # Handle pre-decoder and post-decoder normalization
         def build_norm_layer(normalization_str, use_norm, feature_size, ndims=1):
@@ -2225,12 +2267,12 @@ class Resnet64Decoder(nn.Module):
 
         # Project to 4x4 first
         self.mlp_proj = nn.Sequential(
-            View([-1, input_size]),
+            # View([-1, input_size]),
             init_norm,
             add_normalization(dense_layer_fn(input_size, input_size*4*4),
                               dense_normalization_str, ndims=1, nfeatures=input_size*4*4),
             str_to_activ_module(activation_str if 'evonorm' not in conv_normalization_str else 'relu')(),
-            View([-1, input_size, 4, 4]),
+            # View([-1, input_size, 4, 4]),
         )
 
         # The main model
@@ -2258,10 +2300,14 @@ class Resnet64Decoder(nn.Module):
 
     def forward(self, images, upsample_last: bool = False):
         """Iterate over each of the layers to produce an output."""
-        if images.dim() == 2:
-            images = images.unsqueeze(-1).unsqueeze(-1)
+        while images.shape[-1] == 1:  # ensure that we squeeze out and (*, *, 1, 1) dimensions
+            images = images.squeeze(-1)
 
         outputs = self.mlp_proj(images)
+        print("mlp out = ", outputs.shape)
+        outputs = outputs.view((*outputs.shape[0:-1], self.input_size, 4, 4))
+        print("reshaped out = ", outputs.shape)
+
         outputs = self.model(outputs)
         outputs = self.final_conv(outputs)
 
@@ -2817,7 +2863,7 @@ class Conv64Decoder(nn.Module):
 
     def forward(self, images, upsample_last: bool = False):
         """Iterate over each of the layers to produce an output."""
-        if images.dim() == 2:
+        if images.dim() == 2 or images.dim() == 3:
             images = images.unsqueeze(-1).unsqueeze(-1)
 
         outputs = self.model(images)
@@ -2963,7 +3009,7 @@ class Resnet128Encoder(nn.Module):
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
-        assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
+        assert_proper_conv_sizing(self, images)
         outputs = self.model(images)
         outputs = torch.mean(self.act(outputs), [-2, -1])     # pool over x and y
         outputs = outputs.view(list(outputs.shape) + [1, 1])  # un-flatten and do 1x1
@@ -3016,7 +3062,7 @@ class Resnet64Encoder(nn.Module):
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
-        assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
+        assert_proper_conv_sizing(self, images)
         outputs = self.model(images)
         outputs = torch.mean(self.act(outputs), [-2, -1])     # pool over x and y after activating
         outputs = outputs.view(list(outputs.shape) + [1, 1])  # un-flatten and do 1x1
@@ -3024,13 +3070,58 @@ class Resnet64Encoder(nn.Module):
         return outputs
 
 
-def convert_layer(container, from_layer, to_layer, set_from_layer_kwargs: bool = True):
+def convert_to_batchconv(container, groups):
+    """Converts standard convolutions to BatchConv with groups=groups.
+
+    :param container: the nn.Module or equivalent container
+    :param groups: number of parallel groups
+    :returns: nothing, does inplace operation to swap things.
+    :rtype: None
+
+    """
+    # replace Conv2d --> BatchConv2d
+    convert_layer(container,
+                  from_layer=nn.Conv2d,
+                  to_layer=functools.partial(BatchConv2D, groups=groups),
+                  set_from_layer_kwargs=True,
+                  ignore_kwargs_list=['groups'])
+
+    # replace ConvTranspose2d --> BatchConvTranspose2d
+    convert_layer(container,
+                  from_layer=nn.ConvTranspose2d,
+                  to_layer=functools.partial(BatchConvTranspose2D, groups=groups),
+                  set_from_layer_kwargs=True,
+                  ignore_kwargs_list=['groups'])
+
+    # replace BatchNorm2d --> BatchedBatchNorm2d
+    convert_layer(container,
+                  from_layer=nn.BatchNorm2d,
+                  to_layer=BatchedBatchNorm2d,
+                  set_from_layer_kwargs=True)
+
+    # replace BatchNorm1d --> BatchedBatchNorm1d
+    convert_layer(container,
+                  from_layer=nn.BatchNorm1d,
+                  to_layer=BatchedBatchNorm1d,
+                  set_from_layer_kwargs=True)
+
+    # replace GroupNorm --> BatchedGroupNorm
+    convert_layer(container,
+                  from_layer=nn.GroupNorm,
+                  to_layer=BatchedGroupNorm,
+                  set_from_layer_kwargs=True)
+
+
+def convert_layer(container, from_layer, to_layer,
+                  set_from_layer_kwargs: bool = True,
+                  ignore_kwargs_list: Optional[List] = None):
     """Convert from_layer to to_layer for all layers in container.
 
     :param container: torch container, nn.Sequential, etc.
     :param from_layer: a class definition (eg: nn.Conv2d)
     :param to_layer: a class defition (eg: GatedConv2d)
     :param set_from_layer_kwargs: uses the kwargs from from_layer and set to_layer values
+    :param ignore_kwargs_list: if set_from_layer_kwargs is True then ignore these fn inputs
     :returns: nothing, modifies container in place
     :rtype: None
 
@@ -3042,11 +3133,37 @@ def convert_layer(container, from_layer, to_layer, set_from_layer_kwargs: bool =
                 signature_list = inspect.getfullargspec(from_layer).args[1:]  # 0th element is arg-list, 0th of that is 'self'
                 kwargs = {sig: getattr(child, sig) if sig != 'bias' else bool(child.bias is not None)
                           for sig in signature_list}
+                if ignore_kwargs_list is not None:  # ignore provided kwargs, useful for when groups is set.
+                    kwargs = {k: v for k, v in kwargs.items() if k not in ignore_kwargs_list}
+
                 to_layer_i = functools.partial(to_layer, **kwargs)
 
             setattr(container, child_name, to_layer_i())
         else:
-            convert_layer(child, from_layer, to_layer, set_from_layer_kwargs=set_from_layer_kwargs)
+            convert_layer(container=child, from_layer=from_layer, to_layer=to_layer,
+                          set_from_layer_kwargs=set_from_layer_kwargs,
+                          ignore_kwargs_list=ignore_kwargs_list)
+
+
+def assert_proper_conv_sizing(module, images):
+    """Simple sanity to assert dimension sizing"""
+    if not hasattr(module, 'is_batched'):
+
+        def _recurse_layers(module):
+            """Recurse the layers and return true if any child is a batch layer."""
+            for child_name, child in module.named_children():
+                if isinstance(child, (BatchConv2D, BatchConvTranspose2D, BatchedGroupNorm, BatchedBatchNorm2d)):
+                    return True
+
+                return _recurse_layers(child)
+
+        is_batched = _recurse_layers(module)
+        module.is_batched = is_batched
+
+    if module.is_batched:
+        assert images.dim() == 5, "Require [Bi, Bj, C, H, W] inputs for {}".format(module)
+    else:
+        assert images.dim() == 4, "Require [B, C, H, W] inputs for {}".format(module)
 
 
 class Resnet32Encoder(nn.Module):
@@ -3092,7 +3209,7 @@ class Resnet32Encoder(nn.Module):
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
-        assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
+        assert_proper_conv_sizing(self, images)
         outputs = self.model(images)
         outputs = torch.mean(self.act(outputs), [-2, -1])     # pool over x and y after activating
         outputs = outputs.view(list(outputs.shape) + [1, 1])  # un-flatten and do 1x1
@@ -3376,7 +3493,7 @@ class Conv4Encoder(nn.Module):
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
-        assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
+        assert_proper_conv_sizing(self, images)
         return self.final_conv(images)
 
 
@@ -3412,7 +3529,7 @@ class Conv8Encoder(nn.Module):
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
-        assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
+        assert_proper_conv_sizing(self, images)
         return self.final_conv(self.model(images))
 
 
@@ -3448,7 +3565,7 @@ class Conv16Encoder(nn.Module):
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
-        assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
+        assert_proper_conv_sizing(self, images)
         return self.final_conv(self.model(images))
 
 
@@ -3484,7 +3601,7 @@ class Conv28Encoder(nn.Module):
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
-        assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
+        assert_proper_conv_sizing(self, images)
         return self.final_conv(self.model(images))
 
 
@@ -3523,7 +3640,7 @@ class Conv32Encoder(nn.Module):
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
-        assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
+        assert_proper_conv_sizing(self, images)
         return self.final_conv(self.model(images))
 
 
@@ -3559,7 +3676,7 @@ class Conv64Encoder(nn.Module):
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
-        assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
+        assert_proper_conv_sizing(self, images)
         return self.final_conv(self.model(images))
 
 
@@ -3595,7 +3712,7 @@ class Conv128Encoder(nn.Module):
 
     def forward(self, images):
         """Iterate over each of the layers to produce an output."""
-        assert len(images.shape) == 4, "Require [B, C, H, W] inputs."
+        assert_proper_conv_sizing(self, images)
         return self.final_conv(self.model(images))
 
 
