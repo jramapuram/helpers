@@ -101,8 +101,9 @@ class SNConv2d(nn.Module):
                  padding=0, dilation=1, groups=1, bias=True, padding_mode='zeros',
                  n_power_iterations=1, eps=1e-12, layer_type=nn.Conv2d):
         super(SNConv2d, self).__init__()
-        net = layer_type(in_channels, out_channels, kernel_size, stride,
-                         padding, dilation, groups, bias, padding_mode)
+        net = layer_type(in_channels, out_channels, kernel_size=kernel_size,
+                         stride=stride, padding=padding, dilation=dilation,
+                         groups=groups, bias=bias, padding_mode=padding_mode)
         self.net = nn.utils.spectral_norm(
             net, n_power_iterations=n_power_iterations, eps=eps)
         self.weight = self.net.weight
@@ -122,8 +123,9 @@ class SNConvTranspose2d(nn.Module):
                  padding=0, output_padding=0, dilation=1, groups=1, bias=True, padding_mode='zeros',
                  n_power_iterations=1, eps=1e-12, layer_type=nn.ConvTranspose2d):
         super(SNConvTranspose2d, self).__init__()
-        net = layer_type(in_channels, out_channels, kernel_size, stride,
-                         padding, output_padding, groups, bias, dilation, padding_mode)
+        net = layer_type(in_channels, out_channels, kernel_size=kernel_size, stride=stride,
+                         padding=padding, output_padding=output_padding,
+                         groups=groups, bias=bias, dilation=dilation, padding_mode=padding_mode)
         self.net = nn.utils.spectral_norm(
             net, n_power_iterations=n_power_iterations, eps=eps)
         self.weight = self.net.weight
@@ -142,7 +144,7 @@ class SNLinear(nn.Module):
     def __init__(self, in_features, out_features, bias=True,
                  n_power_iterations=1, eps=1e-12, layer_type=nn.Linear):
         super(SNLinear, self).__init__()
-        net = layer_type(in_features, out_features, bias)
+        net = layer_type(in_features, out_features, bias=bias)
         self.net = nn.utils.spectral_norm(
             net, n_power_iterations=n_power_iterations, eps=eps)
         self.weight = self.net.weight
@@ -162,9 +164,9 @@ class SineConv2d(nn.Module):
                  padding=0, dilation=1, groups=1, bias=True, padding_mode='zeros',
                  layer_type=nn.Conv2d):
         super(SineConv2d, self).__init__()
-        self.net = layer_type(in_channels, out_channels, kernel_size, stride=stride,
-                              padding=padding, dilation=dilation, groups=groups,
-                              bias=bias, padding_mode=padding_mode)
+        self.net = layer_type(in_channels, out_channels, kernel_size=kernel_size,
+                              stride=stride, padding=padding, dilation=dilation,
+                              groups=groups, bias=bias, padding_mode=padding_mode)
         self.in_features = self.net.weight.size(1)
         self.out_features = self.net.weight.size(0)
         self.init_weights()
@@ -216,8 +218,8 @@ class SineLinear(nn.Module):
             self.linear.weight.uniform_(-np.sqrt(6 / self.in_features),
                                         np.sqrt(6 / self.in_features))
 
-    def extra_repr(self):
-        return 'in_features={in_features}'.format(**self.__dict__)
+    def __repr__(self):
+        return 'Sine' + self.linear.__repr__()
 
     def forward(self, input):
         return torch.sin(self.linear(input))
@@ -799,7 +801,7 @@ class GatedConv2d(nn.Module):
         self.g = layer_type(in_channels, out_channels, kernel_size,
                             stride=stride, padding=padding,
                             dilation=dilation, groups=groups, bias=bias)
-        self.weight_u = None  # to disable adding SN
+        self.weight = h.weight
 
     def forward(self, x):
         if self.activation is None:
@@ -1688,6 +1690,7 @@ def build_pixelcnn_decoder(input_size, output_shape, filter_depth=64,
 
 
 def add_normalization(module, normalization_str, ndims, nfeatures, **kwargs):
+    is_sn_module = isinstance(module, (SNConv2d, SNLinear))
     norm_map = {
         'sync_batchnorm': {
             1: lambda nfeatures, **kwargs: nn.SyncBatchNorm(nfeatures),
@@ -1726,9 +1729,9 @@ def add_normalization(module, normalization_str, ndims, nfeatures, **kwargs):
             3: lambda nfeatures, **kwargs: nn.utils.weight_norm(module)
         },
         'spectralnorm': {
-            1: lambda nfeatures, **kwargs: nn.utils.spectral_norm(module),
-            2: lambda nfeatures, **kwargs: nn.utils.spectral_norm(module),
-            3: lambda nfeatures, **kwargs: nn.utils.spectral_norm(module)
+            1: lambda nfeatures, **kwargs: nn.utils.spectral_norm(module) if not is_sn_module else module,
+            2: lambda nfeatures, **kwargs: nn.utils.spectral_norm(module) if not is_sn_module else module,
+            3: lambda nfeatures, **kwargs: nn.utils.spectral_norm(module) if not is_sn_module else module,
         },
         'none': {
             1: lambda nfeatures, **kwargs: Identity(),
@@ -1895,11 +1898,15 @@ def _build_conv_stack(input_chans, output_chans,
             normalization_str = 'none' if norm_last_layer is False else normalization_str
             norm_fn = functools.partial(norm_fn, normalization_str=normalization_str)
 
-        # special logic for sine-layers
-        li_gn_groups = {'num_groups': _compute_group_norm_planes(chan_out)}
-        layer_i = norm_fn(layer_fn(chan_in, chan_out, kernel_size=k, stride=s),
-                          nfeatures=chan_out, **li_gn_groups)
-        layers.append(layer_i)
+        # create the layer and normalization wrapper
+        try:
+            li_gn_groups = {'num_groups': _compute_group_norm_planes(chan_out)}
+            layer_i = norm_fn(layer_fn(chan_in, chan_out, kernel_size=k, stride=s),
+                              nfeatures=chan_out, **li_gn_groups)
+            layers.append(layer_i)
+        except Exception as e:
+            print("caught error while trying to create layer {} with {}".format(layer_i, normalization_str))
+            raise e
 
         if not is_last_layer and chan_out >= 4 and a:
             layers.append(Attention(chan_out, layer_fn))
@@ -3024,6 +3031,50 @@ class Resnet64Encoder(nn.Module):
         return outputs
 
 
+
+def convert_to_sine_module(container):
+    """Helper to convert an nn.Module or equivalent to Sine by removing BN/activations"""
+
+    # Remove all normalization modules since we don't need them with Sine
+    normalization_modules = [nn.BatchNorm1d, nn.BatchNorm2d, nn.GroupNorm,
+                             nn.InstanceNorm1d, nn.InstanceNorm2d, EvoNorm2D]
+    for norm_mod in normalization_modules:
+        convert_layer(container,                 # remove BN, etc
+                      from_layer=norm_mod,
+                      to_layer=Identity,
+                      set_from_layer_kwargs=False)
+
+    # replace activations since we are replacing Conv/Linear with SineConv/SineLinear
+    activation_modules = [Identity, nn.ELU, nn.Sigmoid, nn.LogSigmoid,
+                          nn.Tanh, OnePlus, Swish, nn.Softmax,
+                          nn.LogSoftmax, nn.SELU, nn.ReLU, nn.Softplus,
+                          nn.Hardtanh, nn.LeakyReLU, nn.Softsign]
+    for act_mod in activation_modules:
+        convert_layer(container,                 # remove ReLU, etc
+                      from_layer=act_mod,
+                      to_layer=Identity,
+                      set_from_layer_kwargs=False)
+
+    # replace Conv2d --> SineConv2d
+    convert_layer(container,
+                  from_layer=nn.Conv2d,
+                  to_layer=SineConv2d,
+                  set_from_layer_kwargs=True)
+
+    # replace ConvTranspose2d --> SineConvTranspose2d
+    convert_layer(container,
+                  from_layer=nn.ConvTranspose2d,
+                  to_layer=SineConvTranspose2d,
+                  set_from_layer_kwargs=True)
+
+    # replace Linear --> SineLinear
+    convert_layer(container,
+                  from_layer=nn.Linear,
+                  to_layer=SineLinear,
+                  set_from_layer_kwargs=True)
+
+
+
 def convert_layer(container, from_layer, to_layer, set_from_layer_kwargs: bool = True):
     """Convert from_layer to to_layer for all layers in container.
 
@@ -3665,12 +3716,14 @@ class Dense(nn.Module):
         self.output_view = View([-1, *output_shape])
 
     def forward(self, inputs):
-        batch_size, feature_size = inputs.shape[0], inputs.shape[-1]
-        assert feature_size == self.input_shape[-1], "feature size mismatch [{}] vs [{}]".format(
-            feature_size, self.input_shape[-1]
+        # Flatten the inputs for the dense model
+        batch_size = inputs.shape[0]
+        h = self.input_view(inputs)
+        feature_size = h.shape[-1]
+        assert feature_size == self.input_shape[-1], "feature size mismatch, expected {}, got {}".format(
+            self.input_shape[-1], inputs.shape
         )
 
-        h = self.input_view(inputs)
         h = self.model(h)
         h = self.output_view(h)
 

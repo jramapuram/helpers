@@ -11,10 +11,11 @@ from functools import partial
 
 from tensorboardX.writer import SummaryWriter
 from .visdom_writer import VisdomWriter
+from .wandb_writer import WandBWriter
 
 
 # Supports both TensorBoard and Visdom (no embedding or graph visualization with Visdom)
-vis_formats = {'tensorboard': SummaryWriter, 'visdom': VisdomWriter}
+vis_formats = {'tensorboard': SummaryWriter, 'visdom': VisdomWriter, 'wandb': WandBWriter}
 
 
 class Grapher:
@@ -42,7 +43,7 @@ class Grapher:
                     if hasattr(subscriber, attr):
                         # Don't use async for specific fns or if we are using tensorboard
                         non_async_fns = ['pickle_data', 'close', 'reconnect_and_replay_log', '__init__', '_connect']
-                        if attr not in non_async_fns and 'tensorboard' not in subscriber_name:
+                        if attr not in non_async_fns and subscriber_name not in ['tensorboard', 'wandb']:
                             fn = partial(getattr(subscriber, attr), *args, **kwargs)
                             asyncio.get_event_loop().run_in_executor(None, fn)
                         else:
@@ -57,5 +58,9 @@ class Grapher:
 
     # Handle writer management (open/close) for the user
     def __del__(self):
-        for _, subscriber in six.iteritems(self.subscribers):
-            subscriber.close()
+        try:
+            for _, subscriber in six.iteritems(self.subscribers):
+                if subscriber is not None:
+                    subscriber.close()
+        except:
+            pass

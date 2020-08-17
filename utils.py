@@ -636,12 +636,14 @@ def get_name(args):
 
     """
     vargs = deepcopy(vars(args))
-    blacklist_keys = ['visdom_url', 'visdom_port', 'data_dir', 'log_dir', 'download', 'cuda', 'uid',
-                      'debug_step', 'detect_anomalies', 'model_dir', 'calculate_fid_with', 'calculate_msssim',
-                      'input_shape', 'fid_model_dir', 'output_dir', 'gpu', 'fid_server', 'metrics_server',
-                      'num_train_samples', 'num_test_samples', 'num_valid_samples', 'workers_per_replica',
+    blacklist_keys = ['visdom_url', 'visdom_port', 'wandb_url', 'wandb_port', 'data_dir', 'log_dir',
+                      'download', 'cuda', 'uid', 'debug_step', 'detect_anomalies', 'model_dir',
+                      'calculate_fid_with', 'calculate_msssim', 'input_shape', 'fid_model_dir',
+                      'output_dir', 'gpu', 'fid_server', 'metrics_server', 'num_train_samples',
+                      'num_test_samples', 'num_valid_samples', 'workers_per_replica',
                       'steps_per_train_epoch', 'total_train_steps', 'distributed_master', 'distributed_port',
-                      'distributed_rank', 'multi_gpu_distributed', 'slurm_job_id']
+                      'distributed_rank', 'multi_gpu_distributed', 'slurm_job_id',
+                      'num_fixed_point_generation_iterations', 'generative_scale_var']
     filtered = {k: v for k, v in vargs.items() if k not in blacklist_keys}  # remove useless info
 
     def _factor(name):
