@@ -45,7 +45,8 @@ class WandBWriter:
             scalar_value (float or string/blobname): Value to save
             global_step (int): Global step value to record
         """
-        wandb.log({tag: scalar_value}, step=global_step, commit=False)
+        scalar_dict = {'epoch': global_step, tag: scalar_value}
+        return self.add_scalars(scalar_dict)
 
     def add_scalars(self, tag_scalar_dict, global_step=None):
         """Adds many scalar data to summary.
@@ -67,7 +68,10 @@ class WandBWriter:
                 'arctanx'
             with the corresponding values.
         """
-        wandb.log(tag_scalar_dict, step=global_step, commit=False)
+        if global_step is not None and 'epoch' not in tag_scalar_dict:
+            tag_scalar_dict['epoch'] = global_step
+
+        wandb.log(tag_scalar_dict, commit=True)
 
     def add_histogram(self, tag, values, global_step=None, bins='tensorflow'):
         """Add histogram to summary.
@@ -79,7 +83,8 @@ class WandBWriter:
             bins (string): one of {'tensorflow', 'auto', 'fd', ...}, this determines how the bins are made. You can find
               other options in: https://docs.scipy.org/doc/numpy/reference/generated/numpy.histogram.html
         """
-        wandb.log({tag: wandb.Histogram(values)}, step=global_step, commit=False)
+        hist_dict = {'epoch': global_step, tag: wandb.Histogram(values)}
+        wandb.log(hist_dict, commit=True)
 
     def add_image(self, tag, img_tensor, global_step=None, caption=None):
         """Add image data to summary.
@@ -94,9 +99,8 @@ class WandBWriter:
             img_tensor: :math:`(C, H, W)`. Use ``torchvision.utils.make_grid()`` to prepare it is a good idea.
             C = colors (can be 1 - grayscale, 3 - RGB, 4 - RGBA)
         """
-        # img_tensor = make_np(img_tensor).transpose((2, 1, 0))
-        # print('img_tensor = ', img_tensor.shape, " | dtype = ", img_tensor.dtype, type(img_tensor))
-        wandb.log({tag: wandb.Image(img_tensor, caption=caption)}, step=global_step, commit=False)
+        img_dict = {'epoch': global_step, tag: wandb.Image(img_tensor, caption=caption)}
+        wandb.log(img_dict, commit=True)
 
     def add_figure(self, tag, figure, global_step=None, close=True):
         """Render matplotlib figure into an image and add it to summary.
@@ -126,7 +130,8 @@ class WandBWriter:
             vid_tensor: :math:`(T, H, W, C)`. (if following visdom format)
             B = batches, C = colors (1, 3, or 4), T = time frames, H = height, W = width
         """
-        wandb.log({tag: wandb.Video(vid_tensor, fps=4, format="gif")}, step=global_step, commit=False)
+        vid_dict = {'epoch': global_step, tag: wandb.Video(vid_tensor, fps=4, format="gif")}
+        wandb.log(vid_dict, commit=True)
 
     def add_audio(self, tag, snd_tensor, global_step=None, sample_rate=44100, caption=None):
         """Add audio data to summary.
@@ -140,8 +145,8 @@ class WandBWriter:
         Shape:
             snd_tensor: :math:`(1, L)`. The values should lie between [-1, 1].
         """
-        wandb.log({tag: [wandb.Audio(snd_tensor, caption=caption, sample_rate=sample_rate/1000.)]},
-                  step=global_step, commit=False)
+        wandb.log({tag: [wandb.Audio(snd_tensor, caption=caption, sample_rate=sample_rate/1000.)],
+                   'epoch': global_step}, commit=True)
 
     def add_text(self, tag, text_string, global_step=None, append=False):
         """Add text data to summary.
@@ -154,7 +159,6 @@ class WandBWriter:
             writer.add_text('lstm', 'This is an lstm', 0)
             writer.add_text('rnn', 'This is an rnn', 10)
         """
-        # TODO(jramapuram): we don't really need this since kwargs are cached
         wandb.run.summary[tag] = text_string
 
     def add_pr_curve(self, tag, labels, predictions, global_step=None, num_thresholds=127, weights=None):
@@ -170,11 +174,12 @@ class WandBWriter:
 
         """
         labels, predictions = make_np(labels), make_np(predictions)
-        wandb.log({tag: wandb.plots.precision_recall(y_true=labels, y_probas=predictions)},
-                  step=global_step, commit=False)
+        pr_dict = {tag: wandb.plots.precision_recall(y_true=labels, y_probas=predictions),
+                   'epoch': global_step}
+        wandb.log(pr_dict, commit=True)
 
     def save(self):
-        # TODO(jramapuram): do we even need this?
+        """Commits a set of logs."""
         wandb.log({})
 
     def close(self):
