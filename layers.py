@@ -801,7 +801,7 @@ class GatedConv2d(nn.Module):
         self.g = layer_type(in_channels, out_channels, kernel_size,
                             stride=stride, padding=padding,
                             dilation=dilation, groups=groups, bias=bias)
-        self.weight = h.weight
+        self.weight = self.h.weight
 
     def forward(self, x):
         if self.activation is None:
@@ -1905,7 +1905,7 @@ def _build_conv_stack(input_chans, output_chans,
                               nfeatures=chan_out, **li_gn_groups)
             layers.append(layer_i)
         except Exception as e:
-            print("caught error while trying to create layer {} with {}".format(layer_i, normalization_str))
+            print("caught error while trying to create layer {} with {}".format(layer_fn, normalization_str))
             raise e
 
         if not is_last_layer and chan_out >= 4 and a:
