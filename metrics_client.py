@@ -26,7 +26,7 @@ class MetricsClient(object):
         :rtype: object
 
         """
-        self.cfg = {'allow_pickle': True, "sync_request_timeout": 180}
+        self.cfg = {'allow_pickle': True, "sync_request_timeout": 30000}
         self.conn = rpyc.connect(host, port, config=self.cfg)
         self.bgsrv = rpyc.BgServingThread(self.conn)
         self.fid = self.conn.root.FID(normalize=normalize_imgs, force_cpu=force_cpu)
