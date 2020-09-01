@@ -3031,7 +3031,6 @@ class Resnet64Encoder(nn.Module):
         return outputs
 
 
-
 def convert_to_sine_module(container):
     """Helper to convert an nn.Module or equivalent to Sine by removing BN/activations"""
 
@@ -3072,7 +3071,6 @@ def convert_to_sine_module(container):
                   from_layer=nn.Linear,
                   to_layer=SineLinear,
                   set_from_layer_kwargs=True)
-
 
 
 def convert_layer(container, from_layer, to_layer, set_from_layer_kwargs: bool = True):

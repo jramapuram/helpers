@@ -53,18 +53,28 @@ def pixel_wise_activation(logits):
     :rtype: torch.Tensor
 
     """
-    # sanity checks
-    assert logits.shape[1] % 256 == 0, "tensor needs to be mod 256 for pixewise activation"
-    assert logits.dim() == 4, "need 4d image for pixelwise activation"
+    def _pixel_wise_activation_single(logits):
+        # sanity checks
+        assert logits.shape[1] % 256 == 0, "tensor needs to be mod 256 for pixewise activation"
+        assert logits.dim() == 4, "need 4d image for pixelwise activation"
 
-    chans = logits.shape[1]
-    # activ = torch.cat([torch.argmax(F.softmax(logits[:, begin_c:end_c, :, :], dim=1), dim=1).unsqueeze(1)
-    #                    for begin_c, end_c in zip(range(0, chans, 256),
-    #                                              range(256, chans+1 , 256))], dim=1)
-    activ = torch.cat([torch.argmax(logits[:, begin_c:end_c, :, :], dim=1).unsqueeze(1)
-                       for begin_c, end_c in zip(range(0, chans, 256),
-                                                 range(256, chans + 1, 256))], dim=1)
-    return activ.type(torch.float32) / 255.0
+        chans = logits.shape[1]
+        # activ = torch.cat([torch.argmax(F.softmax(logits[:, begin_c:end_c, :, :], dim=1), dim=1).unsqueeze(1)
+        #                    for begin_c, end_c in zip(range(0, chans, 256),
+        #                                              range(256, chans+1 , 256))], dim=1)
+        activ = torch.cat([torch.argmax(logits[:, begin_c:end_c, :, :], dim=1).unsqueeze(1)
+                           for begin_c, end_c in zip(range(0, chans, 256),
+                                                     range(256, chans + 1, 256))], dim=1)
+        return activ.type(torch.float32) / 255.0
+
+    if logits.dim() == 5:    # [B, T, 256*C, H, W]
+        return torch.cat([_pixel_wise_activation_single(logits[:, i, ::]).unsqueeze(1)
+                          for i in range(logits.shape[1])], 1)
+    elif logits.dim() == 4:  # [B, 256*C, H, W]
+        return _pixel_wise_activation_single(logits)
+    else:
+        raise NotImplementedError("Unknown dimensions received for pixe_wise_activation, got {} dim".format(
+            logits.dim()))
 
 
 def nll_has_variance(nll_str):
@@ -172,37 +182,48 @@ def nll_pixel_wise(x, recon_x_logits):
     :rtype: torch.Tensor
 
     """
-    batch_size = x.shape[0]
-    chans = recon_x_logits.shape[1]
-    chan_dims = 3 if chans == 256*3 else 1
+    def _nll_pixel_wise_single(x, recon_x_logits):
+        batch_size = x.shape[0]
+        chans = recon_x_logits.shape[1]
+        chan_dims = 3 if chans == 256*3 else 1
 
-    # sanity checks
-    assert x.shape[1] == chan_dims, "target tensor needs to be [B, {}, _, _], got {}".format(chan_dims, x.shape)
-    assert x.dim() == 4 and recon_x_logits.dim() == 4, "need 4d tensors for nll-pixelwise"
-    assert chans % 256 == 0, "reconstruction needs to have chan dim be modulo 256"
+        # sanity checks
+        assert x.shape[1] == chan_dims, "target tensor needs to be [B, {}, _, _], got {}".format(chan_dims, x.shape)
+        assert x.dim() == 4 and recon_x_logits.dim() == 4, "need 4d tensors for nll-pixelwise"
+        assert chans % 256 == 0, "reconstruction needs to have chan dim be modulo 256"
 
-    # create a running buffer and corresponding targets
-    loss = torch.zeros_like(x)
-    targets = pixel_wise_label(x)  # re-scale to make the image its own labels
+        # create a running buffer and corresponding targets
+        loss = torch.zeros_like(x)
+        targets = pixel_wise_label(x)  # re-scale to make the image its own labels
 
-    @torch.jit.script
-    def _looped_cross_entropy(recon_x_logits, targets, loss):
-        for idx, (begin_c, end_c) in enumerate(zip(range(0, recon_x_logits.shape[1], 256),
-                                                   range(256, recon_x_logits.shape[1] + 1, 256))):
-            loss_t = F.cross_entropy(input=recon_x_logits[:, begin_c:end_c, :, :],
-                                     target=targets[:, idx, :, :], reduction='none')
+        # @torch.jit.script
+        def _looped_cross_entropy(recon_x_logits, targets, loss):
+            for idx, (begin_c, end_c) in enumerate(zip(range(0, recon_x_logits.shape[1], 256),
+                                                       range(256, recon_x_logits.shape[1] + 1, 256))):
+                loss_t = F.cross_entropy(input=recon_x_logits[:, begin_c:end_c, :, :],
+                                         target=targets[:, idx, :, :], reduction='none')
 
-            # handle the grayscale issue
-            if loss_t.dim() < 4:
-                loss_t = loss_t.unsqueeze(1)
+                # handle the grayscale issue
+                if loss_t.dim() < 4:
+                    loss_t = loss_t.unsqueeze(1)
 
-            loss += loss_t
+                loss += loss_t
 
-        return loss
+            return loss
 
-    loss = _looped_cross_entropy(recon_x_logits, targets, loss)
-    loss /= chan_dims  # remove channel contribution
-    return torch.sum(loss.view(batch_size, -1), -1)
+        loss = _looped_cross_entropy(recon_x_logits, targets, loss)
+        loss /= chan_dims  # remove channel contribution
+        return torch.sum(loss.view(batch_size, -1), -1)
+
+    if x.dim() == 5:    # [B, T, C, H, W]
+        # NOTE: doing a sum here instead of a mean becuase this is how all other NLLs do it.
+        #       this implies that there needs to be a / T in your loss
+        return torch.sum(torch.cat([_nll_pixel_wise_single(x[:, i, ::], recon_x_logits[:, i, ::]).unsqueeze(1)
+                                    for i in range(x.shape[1])], 1), 1)
+    elif x.dim() == 5:  # [B, C, H, W]
+        return _nll_pixel_wise_single(x, recon_x_logits)
+    else:
+        raise NotImplementedError("Unknown dimensions received for nll_pixel_wise, got {} dim".format(x.dim()))
 
 
 def nll_log_logistic_256(x, recon_x_logits):
