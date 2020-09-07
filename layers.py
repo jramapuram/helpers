@@ -3149,6 +3149,9 @@ class Resnet32Encoder(nn.Module):
         return outputs
 
 
+Resnet28Encoder = Resnet32Encoder
+
+
 class TSMResnetEncoder(nn.Module):
     """Wraps torchvision resnet model such as Resnet50 with TSM."""
 
@@ -3787,6 +3790,7 @@ def get_resnet_encoder(input_shape: Tuple[int, int, int],  # [C, H, W]
         128: Resnet128Encoder,
         64: Resnet64Encoder,
         32: Resnet32Encoder,
+        28: Resnet28Encoder,  # same as Resnet32Encoder, resolved via pooling
     }
     chans, image_size = input_shape[0], input_shape[-1]
 
