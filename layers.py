@@ -3073,6 +3073,48 @@ def convert_to_sine_module(container):
                   set_from_layer_kwargs=True)
 
 
+def convert_batchnorm_to_groupnorm(container):
+    """Recursively convert all batchnorm2d layers to groupnorm."""
+    gn_to_bn_map = {  # This provides the mapping of kwargs
+        'num_channels': 'num_features',
+        'eps': 'eps',
+        'affine': 'affine',
+    }
+    # gn_signature = ['num_groups', 'num_channels', 'eps', 'affine']
+    # bn_signature = ['num_features', 'eps', 'momentum', 'affine', 'track_running_stats' ]
+
+    for child_name, child in container.named_children():
+        if isinstance(child, nn.BatchNorm2d):
+            kwargs = {key: getattr(child, gn_to_bn_map[key]) for key in gn_to_bn_map}
+            kwargs['num_groups'] = _compute_group_norm_planes(getattr(child, 'num_features'))
+
+            # build the layer and set it as the member to overwrite the previous
+            to_layer_i = functools.partial(nn.GroupNorm, **kwargs)
+            setattr(container, child_name, to_layer_i())
+        else:
+            convert_batchnorm_to_groupnorm(child)
+
+
+def convert_batchnorm_to_evonorms0(container):
+    """Recursively convert all batchnorm2d layers to evonorms0."""
+    en_to_bn_map = {  # This provides the mapping of kwargs
+        'num_channels': 'num_features',
+    }
+    # evonorm_sig = ['num_channels', 'num_groups', 'version', 'non_linear','affine','momentum', 'eps']
+    # bn_signature = ['num_features', 'eps', 'momentum', 'affine', 'track_running_stats']
+
+    for child_name, child in container.named_children():
+        if isinstance(child, nn.BatchNorm2d):
+            kwargs = {key: getattr(child, en_to_bn_map[key]) for key in en_to_bn_map}
+            kwargs['num_groups'] = _compute_group_norm_planes(getattr(child, 'num_features'))
+
+            # build the layer and set it as the member to overwrite the previous
+            to_layer_i = functools.partial(EvoNorm2D, **kwargs)
+            setattr(container, child_name, to_layer_i())
+        else:
+            convert_batchnorm_to_evonorms0(child)
+
+
 def convert_layer(container, from_layer, to_layer, set_from_layer_kwargs: bool = True):
     """Convert from_layer to to_layer for all layers in container.
 
