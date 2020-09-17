@@ -526,6 +526,50 @@ def check_or_create_dir(dir_path):
         os.makedirs(dir_path)
 
 
+def slerp(val, low, high):
+    def _slerp_pytorch():
+        """Spherical linear interpolation, from https://bit.ly/3krBVQ7 """
+        value = torch.dot(low / torch.norm(low), high / torch.norm(high))
+        omega = torch.acos(torch.clamp(value, -1, 1))
+        so = torch.sin(omega)
+        if so == 0:
+            # L'Hopital's rule / LERP
+            return (1.0-val) * low + val * high
+
+        return torch.sin((1.0-val)*omega) / so * low + torch.sin(val*omega) / so * high
+
+    def _slerp_np():
+        """Spherical linear interpolation, from https://bit.ly/3krBVQ7 """
+        value = np.dot(low / np.linalg.norm(low), high / np.linalg.norm(high))
+        omega = np.arccos(np.clip(value, -1, 1))
+        so = np.sin(omega)
+        if so == 0:
+            # L'Hopital's rule / LERP
+            return (1.0-val) * low + val * high
+
+        return np.sin((1.0-val) * omega) / so * low + np.sin(val * omega) / so * high
+
+    return _slerp_np() if not isinstance(val, torch.Tensor) else _slerp_pytorch()
+
+
+def spherical_interpolate(p1, p2, n_steps=8):
+    """Spherical interpolation between two vectors."""
+    assert p1.dim() == p2.dim() == 1, "Only 1d vectors are currently supported."
+
+    def _spherical_interpolate_pytorch():
+        ratios = torch.linspace(0, 1, steps=n_steps)
+        vectors = [slerp(ratio, p1, p2).unsqueeze(0) for ratio in ratios]
+        return torch.cat(vectors, 0)
+
+    def _spherical_interpolate_np():
+        ratios = np.linspace(0, 1, num=n_steps)
+        vectors = [slerp(ratio, p1, p2) for ratio in ratios]
+        return np.asarray(vectors)
+
+    return _spherical_interpolate_np() if not isinstance(p1, torch.Tensor) \
+        else _spherical_interpolate_pytorch()
+
+
 class ToFP16(nn.Module):
     def __init__(self):
         super(ToFP16, self).__init__()
